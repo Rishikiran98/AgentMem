@@ -37,6 +37,15 @@ class AppendOnlyJsonlLogger:
         # O_APPEND: every write lands at the current end of file regardless of
         # what other writers have done.  No O_TRUNC, ever.
         self._fd = os.open(str(self.path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        # A resumed writer continues its own sequence. This does not mutate the
+        # existing trace and keeps sequence validation meaningful.
+        if self.path.stat().st_size:
+            try:
+                last = list(read_events(self.path))[-1]
+                if last.get("proxy_instance_id") == self.instance_id:
+                    self._seq = int(last.get("seq", 0))
+            except (ValueError, OSError, KeyError):
+                pass
 
     @property
     def seq(self) -> int:

@@ -18,7 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 # Systems under test are pinned exactly; the pins are part of the experimental record.
 mem0 = [
-    "mem0ai==2.0.20",
+    "mem0ai[nlp,extras]==2.0.20",
     "qdrant-client==1.19.0",
 ]
 dev = [

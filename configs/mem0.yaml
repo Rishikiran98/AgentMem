@@ -6,7 +6,7 @@ adapter: adapters.mem0:Mem0Adapter
 description: >
   Mem0 OSS running in-process (AsyncMemory) with a dedicated Qdrant server
   (compose/mem0) and its SQLite history DB. All model calls go through the
-  benchmark proxy. Library defaults are kept unless noted.
+  benchmark proxy. Every result-affecting option is frozen below.
 
 mem0:
   llm:
@@ -31,11 +31,15 @@ mem0:
   history_db_path: results/state/mem0/history.db
   infer: true                   # LLM fact extraction on write (Mem0's documented default path)
   custom_instructions: null
+  graph:
+    enabled: false               # graph memory is outside this vector-memory configuration
 
 retrieval:
   top_k: 20                     # mem0ai search() default
   threshold: 0.1                # mem0ai search() default minimum score
   rerank: false
+  hybrid_search: false           # dense retrieval only; optional fastembed BM25 is not activated
+  entity_boosting: false         # no spaCy/entity-derived score modification
 
 settlement:
   timeout_s: 30

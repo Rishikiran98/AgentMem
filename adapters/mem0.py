@@ -61,6 +61,9 @@ class Mem0Settings:
     top_k: int = 20
     threshold: float | None = 0.1
     rerank: bool = False
+    hybrid_search: bool = False
+    entity_boosting: bool = False
+    graph_enabled: bool = False
     canary_infer: bool = False
     system_commit: str | None = None
 
@@ -79,6 +82,9 @@ class Mem0Settings:
             top_k=int(r.get("top_k", 20)),
             threshold=r.get("threshold", 0.1),
             rerank=bool(r.get("rerank", False)),
+            hybrid_search=bool(r.get("hybrid_search", False)),
+            entity_boosting=bool(r.get("entity_boosting", False)),
+            graph_enabled=bool(m.get("graph", {}).get("enabled", False)),
             canary_infer=bool(s.get("canary_infer", False)),
             system_commit=cfg.get("system_commit"),
         )
@@ -319,7 +325,11 @@ class Mem0Adapter(MemoryAdapter):
             },
             "history_db_path": s.history_db_path,
             "write": {"infer": s.infer, "custom_instructions": s.custom_instructions},
-            "retrieval": {"top_k": s.top_k, "threshold": s.threshold, "rerank": s.rerank},
+            "retrieval": {
+                "top_k": s.top_k, "threshold": s.threshold, "rerank": s.rerank,
+                "hybrid_search": s.hybrid_search, "entity_boosting": s.entity_boosting,
+            },
+            "graph": {"enabled": s.graph_enabled},
             "settlement": {"timeout_s": self.settlement_config.timeout_s, "poll_interval_s": self.settlement_config.poll_interval_s, "canary_cleanup": self.settlement_config.canary_cleanup, "canary_infer": s.canary_infer},
             "feature_flags": _feature_flags(),
             "prompts": _prompt_hashes(),
