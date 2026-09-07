@@ -13,6 +13,11 @@ Failure injection by model name:
     fail-timeout                  -> sleeps 30 s before answering
     slow-<ms>[-*]                 -> sleeps <ms> milliseconds before answering
 Streaming is supported (SSE, one word per chunk) with ``stream_options.include_usage``.
+
+Mem0 emulation: when the system prompt is Mem0's additive extraction prompt
+("You are a Memory Extractor"), the reply is the JSON Mem0 expects, with one
+memory per user/assistant message taken verbatim from the "## New Messages"
+section.  This exercises Mem0's real write pipeline without a real LLM.
 """
 from __future__ import annotations
 
@@ -53,6 +58,35 @@ def embedding_prompt_tokens(inp: Any) -> int:
     return 0
 
 
+def mem0_extraction_reply(messages: list[dict[str, Any]]) -> str | None:
+    """Return Mem0-format extraction JSON if this looks like a Mem0 extraction call."""
+    system = next((m.get("content") for m in messages if m.get("role") == "system"), "")
+    if not isinstance(system, str) or "Memory Extractor" not in system:
+        return None
+    user = next((m.get("content") for m in reversed(messages) if m.get("role") == "user"), "")
+    if not isinstance(user, str):
+        return json.dumps({"memory": []})
+    m = re.search(r"## New Messages\n(.*?)\n\n## ", user, flags=re.S)
+    if not m:
+        return json.dumps({"memory": []})
+    section = m.group(1).strip()
+    new_messages: list[dict[str, Any]] = []
+    try:  # JSON form
+        parsed = json.loads(section)
+        if isinstance(parsed, list):
+            new_messages = [x for x in parsed if isinstance(x, dict)]
+    except json.JSONDecodeError:  # Mem0's parse_messages() form: "role: content" per line
+        for line in section.split("\n"):
+            role, sep, content = line.partition(": ")
+            if sep and role in ("user", "assistant", "system"):
+                new_messages.append({"role": role, "content": content})
+    out = []
+    for msg in new_messages:
+        if msg.get("role") in ("user", "assistant") and isinstance(msg.get("content"), str) and msg["content"].strip():
+            out.append({"id": str(len(out)), "text": msg["content"].strip(), "attributed_to": msg["role"]})
+    return json.dumps({"memory": out})
+
+
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse({"error": {"message": message, "type": "fake_upstream_error", "param": None, "code": None}}, status_code=status)
 
@@ -91,9 +125,15 @@ def create_fake_upstream() -> FastAPI:
             return failure
         messages = body.get("messages") or []
         prompt_tokens = chat_prompt_tokens(messages)
-        n_words = min(int(body.get("max_tokens") or 16), 16)
-        words = [f"w{i + 1}" for i in range(n_words)]
-        completion = " ".join(words)
+        mem0_reply = mem0_extraction_reply(messages)
+        if mem0_reply is not None:
+            completion = mem0_reply
+            words = [completion]
+            n_words = word_count(completion)
+        else:
+            n_words = min(int(body.get("max_tokens") or 16), 16)
+            words = [f"w{i + 1}" for i in range(n_words)]
+            completion = " ".join(words)
         usage = {"prompt_tokens": prompt_tokens, "completion_tokens": n_words, "total_tokens": prompt_tokens + n_words}
         rid = "chatcmpl-" + uuid.uuid4().hex[:12]
         created = int(time.time())

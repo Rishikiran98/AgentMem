@@ -1,0 +1,33 @@
+# Persistence for the Mem0 system under test: a dedicated Qdrant server with
+# its own volume and network.  Mem0 itself runs in-process in the harness.
+# Nothing here is shared with any other system's compose stack.
+#
+#   docker compose -f compose/mem0/docker-compose.yml up -d
+#   docker compose -f compose/mem0/docker-compose.yml down -v   # full wipe
+services:
+  qdrant:
+    # Pinned to the qdrant-client version in the lockfile (1.19.x); verify the
+    # tag exists and record `GET /` version in the run fingerprint.
+    image: qdrant/qdrant:v1.19.0
+    container_name: memharness-mem0-qdrant
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      - mem0_qdrant_data:/qdrant/storage
+    networks:
+      - mem0_net
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: "no"
+
+volumes:
+  mem0_qdrant_data:
+    name: memharness_mem0_qdrant_data
+
+networks:
+  mem0_net:
+    name: memharness_mem0_net

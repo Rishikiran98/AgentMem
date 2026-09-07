@@ -16,7 +16,7 @@ must trace back to an immutable raw event.
 | Milestone | Component | State |
 |---|---|---|
 | 1 | Instrumented LLM proxy (`proxy/`) | **done, validated** (see below) |
-| 2 | Mem0 adapter | not started |
+| 2 | Mem0 adapter (`adapters/`) | **done, validated** offline; real-provider run pending |
 | 3 | LongMemEval-S runner | not started |
 | 4 | Mem0 reproduction | not started |
 | 5–7 | Zep, Letta, HIEROMEM adapters | not started |
@@ -33,9 +33,15 @@ proxy/          instrumented OpenAI-compatible proxy (Milestone 1)
   client.py     harness-side helper (tagging + scopes)
   fake_upstream.py deterministic mock provider for tests/demos
   tests/        pytest suite
-scripts/        demo_milestone1.py
+adapters/       uniform async memory interface (Milestone 2)
+  base.py       MemoryAdapter ABC, WriteResult/ReadResult/CanaryRecord/SettlementResult, event emission
+  mem0.py       Mem0 (mem0ai OSS, in-process) adapter
+  registry.py   config loading + adapter construction; configuration id = sha256(config bytes)
+configs/        committed system configurations (mem0.yaml)
+compose/        per-system persistence stacks (compose/mem0: dedicated Qdrant)
+scripts/        demo_milestone1.py, demo_milestone2.py
+tests/          adapter tests against live proxy + fake upstream servers
 docs/examples/  committed example trace
-configs/        (system configs, later milestones)
 results/raw/    gitignored raw JSONL traces
 results/summaries/  committed compact summaries
 ```
@@ -44,7 +50,7 @@ results/summaries/  committed compact summaries
 
 ```bash
 uv venv .venv --python 3.11 && source .venv/bin/activate
-uv pip install -e ".[dev]"
+uv pip install -e ".[dev,mem0]"
 ```
 
 ## Milestone 1: the instrumented proxy
@@ -244,6 +250,119 @@ checks pass. The resulting trace lines are committed at
     with `--upstream https://api.openai.com/v1` must be run once with a key
     before Milestone 2 to confirm real `usage` blocks (including
     `prompt_tokens_details`) and base64 embeddings behave as tested.
+
+## Milestone 2: the adapter layer and the Mem0 adapter
+
+### Interface
+
+`adapters/base.py` defines `MemoryAdapter` with the spec's `reset / write /
+read / is_settled / config_fingerprint` plus the helpers the runner needs:
+`search` (structured read), `plant_canary`, `wait_settled`, `reset_all`,
+`health`, `close`. The base class owns timing and event emission
+(`RESET_*`, `WRITE_SUBMIT`, `WRITE_ACK`, `READ_START/END`, `CANARY_SUBMIT/ACK`,
+`SETTLEMENT_POLL`, `WRITE_SETTLED`, `SETTLEMENT_TIMEOUT`, `ERROR`); subclasses
+implement only the system-specific `_impl` hooks, so no adapter can quietly
+differ in what it measures. Context assembly is uniform: retrieved memory
+texts, one per line, in the system's own order, nothing added or removed.
+
+### Settlement protocol
+
+1. `plant_canary(session)` writes "The verification code for this session is
+   memharness-canary-XXXX." through the system's own write path and records
+   submission and acknowledgement times plus whether the system reported
+   storing it.
+2. `is_settled(session)` issues the *normal read path* (`search`, tagged
+   `operation=settle`) with the canary text as the query and returns True only
+   when the token appears in the assembled context. Each poll is an event.
+3. `wait_settled` polls until True or the configured timeout, then deletes the
+   canary memory through the system's documented delete API so it cannot occupy
+   a retrieval slot later. Timeouts are reported as `SETTLEMENT_TIMEOUT`, never
+   swallowed.
+
+Derived per canary: write acknowledgement latency, ingestion-to-retrievability
+lag (ack to first retrievable), submission-to-retrievability latency, poll
+count, timeout flag, cleanup outcome. Because visibility is sampled by polling,
+the lag has a floor of one read latency and a resolution of one poll interval;
+when `polls == 1` the true lag is only known to be at most the reported value.
+Analysis must report it that way.
+
+### Mem0 adapter (`adapters/mem0.py`)
+
+Mem0 OSS (`mem0ai` 2.0.20, pinned) runs in-process via its documented
+`AsyncMemory` API with a dedicated Qdrant server (`compose/mem0`) and its own
+SQLite history DB. Model traffic reaches the proxy through Mem0's own
+`openai_base_url` / `api_key` settings.
+
+| Benchmark op | Mem0 call |
+|---|---|
+| `reset(s)` | `delete_all(user_id=s)`, then `get_all(filters={"user_id": s})` must be empty or the reset raises |
+| `write(s, msgs)` | `add(msgs, user_id=s, infer=True)` |
+| `read(s, q)` | `search(q, filters={"user_id": s}, top_k=20, threshold=0.1, rerank=False)` (library defaults) |
+| canary | `add([...], user_id=s, infer=False)`; polled with the same `search`; removed with `delete(id)` |
+| `reset_all()` | `AsyncMemory.reset()` on a throw-away instance plus removal of the `_entities` collection |
+
+Attribution: three `AsyncMemory` instances (write / read / settle) share one
+Qdrant client and one history DB, so they are one store, but each carries a
+proxy API-key token with its own `operation` and `client_id`. Operation
+attribution is therefore exact even under concurrency; the session is attached
+with a proxy scope around each call. Mem0's PostHog telemetry is disabled
+before import. Retries performed by the OpenAI SDK inside Mem0 appear as
+separate `MODEL_CALL` events, which is correct: they are real provider calls.
+
+The fingerprint records the mem0ai version, prompt hashes, all model and
+retrieval parameters, Qdrant mode/version, and feature flags that change
+retrieval behaviour: whether spaCy's `en_core_web_sm` (entity boosting) and
+`fastembed` (BM25 hybrid search) are installed. Both are absent in this
+sandbox; the paper deployment installs `mem0ai[nlp,extras]` so Mem0's
+documented hybrid search is active, and the flags make the difference visible.
+
+### Run it
+
+```bash
+docker compose -f compose/mem0/docker-compose.yml up -d     # Qdrant for paper runs
+.venv/bin/python -m pytest tests -q                         # adapter suite (embedded Qdrant)
+.venv/bin/python scripts/demo_milestone2.py --sessions 5    # repeated-session validation
+.venv/bin/python scripts/demo_milestone2.py --upstream https://api.openai.com/v1 --qdrant server
+```
+
+`tests/test_mem0_adapter.py` (10 tests) runs the proxy and fake upstream as real
+uvicorn servers and verifies: reset/write/read/settle over repeated sessions
+with cross-session isolation; idempotent, verified reset; every model call
+routed through the proxy with exact system/configuration/seed/run/session/
+operation attribution and per-operation `client_id`; complete and ordered
+adapter events with non-null lag fields; `is_settled` refusing to answer
+without a canary; settlement timeouts surfacing as events; write failures
+raised and visible as proxy error events; `reset_all` wiping and rebuilding;
+fingerprint completeness; and the committed `configs/mem0.yaml` loading and
+building a working adapter. The demo shows five sessions with 0 of 35 model
+calls lacking full attribution.
+
+### Design decisions that affect later benchmark validity
+
+11. **Mem0's v3 pipeline is ADD-only.** mem0ai 2.x extracts memories with an
+    additive prompt and deduplicates by hash; there are no UPDATE/DELETE
+    events. Counts are still recorded per event type for other systems.
+12. **The canary bypasses LLM extraction (`infer=False`).** With extraction
+    on, the model may legitimately decide the canary is not memorable, which
+    would make settlement inconclusive rather than false. With it off, the
+    canary exercises the embedding + vector-store path, which is the only part
+    of Mem0's write that can lag acknowledgement (extraction is synchronous
+    and already inside the ack latency). `settlement.canary_infer` flips this.
+13. **Observation dates.** mem0ai OSS rejects the `timestamp` parameter and
+    grounds relative time expressions to the current date. LongMemEval session
+    dates therefore have to be carried in message content, a preprocessing
+    choice for Milestone 3 that must match what the published setup did.
+14. **Session = LongMemEval question instance.** `session_id` maps to Mem0's
+    `user_id`; all haystack sessions of one question are written under it,
+    which is the retrieval scope the benchmark implies.
+15. **Embedded vs server Qdrant.** Tests use embedded mode (no daemon in the
+    sandbox; payload indexes are no-ops there). Paper runs use the compose
+    server; the fingerprint records the mode and server version so the two
+    are never confused.
+16. **Not yet run against a real provider.** As with Milestone 1, the sandbox
+    cannot reach OpenAI; the demo used the fake upstream's Mem0 extraction
+    emulation. Run `scripts/demo_milestone2.py --upstream ... --qdrant server`
+    once with a key before Milestone 3.
 
 ## Engineering rules (from the pre-registration)
 

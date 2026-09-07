@@ -1,0 +1,47 @@
+# Mem0 (open-source mem0ai) benchmark configuration.
+# Committed before any comparative result is inspected; the SHA-256 of this
+# file's bytes is the `configuration` tag on every proxy event of a run.
+system: mem0
+adapter: adapters.mem0:Mem0Adapter
+description: >
+  Mem0 OSS running in-process (AsyncMemory) with a dedicated Qdrant server
+  (compose/mem0) and its SQLite history DB. All model calls go through the
+  benchmark proxy. Library defaults are kept unless noted.
+
+mem0:
+  llm:
+    provider: openai
+    model: gpt-4o-mini          # memory (extraction) model
+    temperature: 0.1            # mem0ai default
+    max_tokens: 2000            # mem0ai default
+    top_p: 0.1                  # mem0ai default
+  embedder:
+    provider: openai
+    model: text-embedding-3-small
+    embedding_dims: 1536
+  vector_store:
+    provider: qdrant
+    mode: server                # server (compose/mem0) | embedded (tests only)
+    host: 127.0.0.1
+    port: 6333
+    path: null                  # embedded-mode storage directory
+    collection_name: memharness_mem0
+    embedding_model_dims: 1536
+    on_disk: true
+  history_db_path: results/state/mem0/history.db
+  infer: true                   # LLM fact extraction on write (Mem0's documented default path)
+  custom_instructions: null
+
+retrieval:
+  top_k: 20                     # mem0ai search() default
+  threshold: 0.1                # mem0ai search() default minimum score
+  rerank: false
+
+settlement:
+  timeout_s: 30
+  poll_interval_s: 0.25
+  canary_cleanup: true          # delete the canary memory after settlement is observed
+  canary_infer: false           # canary bypasses LLM extraction (deterministic storage); see README
+
+# Set when mem0ai is installed from a git checkout instead of PyPI.
+system_commit: null
