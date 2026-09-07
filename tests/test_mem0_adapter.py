@@ -11,6 +11,7 @@ import pytest
 from adapters.base import AdapterError, SettlementConfig, SettlementError
 from adapters.mem0 import Mem0Adapter, Mem0Settings
 from adapters.registry import build_adapter, load_config
+from proxy.fake_upstream import EMBED_DIM
 from proxy.logging import read_events
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +21,7 @@ def mem0_settings(tmp_path: Path) -> Mem0Settings:
     return Mem0Settings(
         llm={"provider": "openai", "model": "fake-model", "temperature": 0.1, "max_tokens": 2000, "top_p": 0.1},
         embedder={"provider": "openai", "model": "fake-embed"},  # no embedding_dims: fake upstream returns 8-d vectors
-        vector_store={"provider": "qdrant", "mode": "embedded", "path": str(tmp_path / "qdrant"), "collection_name": "memharness_test", "embedding_model_dims": 8, "on_disk": True},
+        vector_store={"provider": "qdrant", "mode": "embedded", "path": str(tmp_path / "qdrant"), "collection_name": "memharness_test", "embedding_model_dims": EMBED_DIM, "on_disk": True},
         history_db_path=str(tmp_path / "history.db"),
         infer=True,
         top_k=20,
@@ -200,7 +201,7 @@ async def test_config_fingerprint_is_complete(adapter):
 async def test_committed_config_loads_and_builds(proxy_server, tmp_path):
     cfg = load_config(ROOT / "configs" / "mem0.yaml")
     assert cfg["system"] == "mem0" and len(cfg["_configuration_id"]) == 16
-    overrides = {"mem0": {"llm": {"model": "fake-model"}, "embedder": {"model": "fake-embed", "embedding_dims": None}, "vector_store": {"mode": "embedded", "path": str(tmp_path / "q"), "embedding_model_dims": 8}, "history_db_path": str(tmp_path / "h.db")}}
+    overrides = {"mem0": {"llm": {"model": "fake-model"}, "embedder": {"model": "fake-embed", "embedding_dims": None}, "vector_store": {"mode": "embedded", "path": str(tmp_path / "q"), "embedding_model_dims": EMBED_DIM}, "history_db_path": str(tmp_path / "h.db")}}
     a = build_adapter(cfg, proxy_base_url=proxy_server.url, seed=1, run_id="r", overrides=overrides)
     assert isinstance(a, Mem0Adapter) and a.settlement_config.timeout_s == 30
     await a.start()

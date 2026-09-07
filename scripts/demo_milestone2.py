@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from adapters.registry import build_adapter, load_config  # noqa: E402
+from proxy.fake_upstream import EMBED_DIM  # noqa: E402
 from proxy.logging import AppendOnlyJsonlLogger, read_events  # noqa: E402
 
 PY = sys.executable
@@ -105,7 +106,7 @@ def main() -> int:
     overrides: dict = {"mem0": {"history_db_path": str(state / "history.db")}}
     if not real:
         overrides["mem0"].update({"llm": {"model": "fake-model"}, "embedder": {"model": "fake-embed", "embedding_dims": None}})
-        overrides["mem0"]["vector_store"] = {"embedding_model_dims": 8}
+        overrides["mem0"]["vector_store"] = {"embedding_model_dims": EMBED_DIM}
     if args.qdrant == "embedded":
         overrides["mem0"].setdefault("vector_store", {}).update({"mode": "embedded", "path": str(state / "qdrant")})
 

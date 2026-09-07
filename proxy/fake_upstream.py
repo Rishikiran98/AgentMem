@@ -33,7 +33,71 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-EMBED_DIM = 8
+EMBED_DIM = 64
+_STOP = {"the", "a", "an", "is", "my", "what", "of", "to", "in", "on", "and", "i", "me", "it", "do", "you", "your", "this", "that", "was", "are", "for", "by", "way"}
+
+
+def fake_embedding(text: Any) -> list[float]:
+    """Deterministic bag-of-words hashed embedding (unit norm).
+
+    Texts sharing content words get correlated vectors, so a query like "What is
+    my favorite color?" retrieves "my favorite color is teal" ahead of unrelated
+    memories.  Purely a test device: no semantic model is involved.
+    """
+    words = [w.strip(".,!?;:\"'()[]").lower() for w in str(text).split()]
+    words = [w for w in words if w and w not in _STOP]
+    vec = [0.0] * EMBED_DIM
+    for w in words or ["<empty>"]:
+        d = hashlib.sha256(w.encode()).digest()
+        for j in range(EMBED_DIM):
+            vec[j] += ((d[j % len(d)] / 255.0) * 2 - 1)
+    norm = sum(v * v for v in vec) ** 0.5 or 1.0
+    return [v / norm for v in vec]
+
+
+def _section(text: str, start: str, end: str) -> str | None:
+    i = text.find(start)
+    if i < 0:
+        return None
+    j = text.find(end, i + len(start))
+    return text[i + len(start): j if j >= 0 else None]
+
+
+def _words(text: str) -> set[str]:
+    return {w.strip(".,!?;:\"'()[]").lower() for w in text.split()} - _STOP - {""}
+
+
+def longmemeval_reader_reply(messages: list[dict[str, Any]]) -> str | None:
+    """Emulate the reader: answer with the context line that best overlaps the question."""
+    user = next((m.get("content") for m in reversed(messages) if m.get("role") == "user"), "")
+    if not isinstance(user, str) or "History Chats:" not in user or "\nQuestion: " not in user:
+        return None
+    history = (_section(user, "History Chats:\n\n", "\n\nCurrent Date:") or "").strip()
+    question = user.rsplit("\nQuestion: ", 1)[1].split("\nAnswer", 1)[0].strip()
+    lines = [l for l in history.split("\n") if l.strip()]
+    if not lines:
+        return "I don't have any information about that in our previous conversations."
+    qw = _words(question)
+    best = max(lines, key=lambda l: (len(_words(l) & qw), -len(l)))
+    if not (_words(best) & qw):
+        return "I don't have any information about that in our previous conversations."
+    return best
+
+
+def longmemeval_judge_reply(messages: list[dict[str, Any]]) -> str | None:
+    """Emulate the judge: yes iff every content word of the gold answer appears in the response."""
+    user = next((m.get("content") for m in reversed(messages) if m.get("role") == "user"), "")
+    if not isinstance(user, str) or "Model Response: " not in user:
+        return None
+    response = (user.rsplit("Model Response: ", 1)[1].rsplit("\n\n", 1)[0]).lower()
+    if user.startswith("I will give you an unanswerable question"):
+        return "yes" if ("don't have" in response or "no information" in response or "not mentioned" in response) else "no"
+    for key in ("Correct Answer: ", "Rubric: "):
+        gold = _section(user, key, "\n\nModel Response: ")
+        if gold is not None:
+            gw = _words(gold)
+            return "yes" if gw and gw <= _words(response) else "no"
+    return "no"
 
 
 def word_count(text: Any) -> int:
@@ -125,9 +189,13 @@ def create_fake_upstream() -> FastAPI:
             return failure
         messages = body.get("messages") or []
         prompt_tokens = chat_prompt_tokens(messages)
-        mem0_reply = mem0_extraction_reply(messages)
-        if mem0_reply is not None:
-            completion = mem0_reply
+        scripted = mem0_extraction_reply(messages)
+        if scripted is None:
+            scripted = longmemeval_reader_reply(messages)
+        if scripted is None:
+            scripted = longmemeval_judge_reply(messages)
+        if scripted is not None:
+            completion = scripted
             words = [completion]
             n_words = word_count(completion)
         else:
@@ -184,9 +252,7 @@ def create_fake_upstream() -> FastAPI:
         items: list[Any] = [inp] if isinstance(inp, str) or (isinstance(inp, list) and inp and all(isinstance(x, int) for x in inp)) else list(inp or [])
         data = []
         for i, item in enumerate(items):
-            digest = hashlib.sha256(json.dumps(item).encode()).digest()
-            vec = [((digest[j] / 255.0) * 2 - 1) for j in range(EMBED_DIM)]
-            data.append({"object": "embedding", "index": i, "embedding": vec})
+            data.append({"object": "embedding", "index": i, "embedding": fake_embedding(item)})
         pt = embedding_prompt_tokens(inp)
         return JSONResponse({"object": "list", "data": data, "model": model, "usage": {"prompt_tokens": pt, "total_tokens": pt}}, headers={"x-request-id": "up-" + uuid.uuid4().hex[:8]})
 

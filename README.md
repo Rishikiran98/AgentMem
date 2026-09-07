@@ -17,8 +17,8 @@ must trace back to an immutable raw event.
 |---|---|---|
 | 1 | Instrumented LLM proxy (`proxy/`) | **done, validated** (see below) |
 | 2 | Mem0 adapter (`adapters/`) | **done, validated** offline; real-provider run pending |
-| 3 | LongMemEval-S runner | not started |
-| 4 | Mem0 reproduction | not started |
+| 3 | LongMemEval-S runner (`bench/`) | **done, validated** on synthetic data; real dataset + provider run pending |
+| 4 | Mem0 reproduction | not started (needs dataset, key, and a cited published number) |
 | 5–7 | Zep, Letta, HIEROMEM adapters | not started |
 | 8–12 | cross-system accuracy, load driver, scale, faults, analysis | not started |
 
@@ -37,7 +37,16 @@ adapters/       uniform async memory interface (Milestone 2)
   base.py       MemoryAdapter ABC, WriteResult/ReadResult/CanaryRecord/SettlementResult, event emission
   mem0.py       Mem0 (mem0ai OSS, in-process) adapter
   registry.py   config loading + adapter construction; configuration id = sha256(config bytes)
-configs/        committed system configurations (mem0.yaml)
+bench/          LongMemEval-S runner (Milestone 3)
+  longmemeval.py dataset schema/loader, seeded selection, synthetic stand-in
+  prompts.py    official LongMemEval reader + judge prompts, verbatim, with source hashes
+  llm.py        proxy-routed chat client for harness-owned calls (answer/judge)
+  reader.py / judge.py   fixed reader and judge
+  runner.py     ingestion -> settlement -> retrieval -> reader -> judge; append-only run.jsonl
+  run.py        CLI: python -m bench.run ...
+  metadata.py   host/software metadata for RUN_START
+configs/        committed system configurations (mem0.yaml) and benchmark configs (benchmarks/longmemeval_s.yaml)
+data/           gitignored datasets (scripts/fetch_longmemeval.py)
 compose/        per-system persistence stacks (compose/mem0: dedicated Qdrant)
 scripts/        demo_milestone1.py, demo_milestone2.py
 tests/          adapter tests against live proxy + fake upstream servers
@@ -363,6 +372,101 @@ calls lacking full attribution.
     cannot reach OpenAI; the demo used the fake upstream's Mem0 extraction
     emulation. Run `scripts/demo_milestone2.py --upstream ... --qdrant server`
     once with a key before Milestone 3.
+
+## Milestone 3: the LongMemEval-S runner
+
+### Data path
+
+```
+LongMemEval-S json ─▶ bench.longmemeval (schema check, sha256, seeded order)
+   ─▶ Runner: per instance  reset(qid) ─▶ write() per haystack session (dated) ─▶ wait_settled()
+                            ─▶ search(question) ─▶ Reader (official facts prompt) ─▶ Judge (official prompt)
+   ─▶ results/raw/runs/<run_id>/run.jsonl  +  manifest.json          (proxy log written separately by the proxy)
+```
+
+```bash
+python -m proxy --port 8811 --upstream https://api.openai.com/v1 --log results/raw/proxy/campaign.jsonl
+python scripts/fetch_longmemeval.py                  # data/longmemeval_s_cleaned.json + sha256
+python -m bench.run --system mem0 --benchmark longmemeval_s --seed 42 --config configs/mem0.yaml
+python -m bench.run ... --limit 20                   # first 20 of the seeded order (reproducible subset)
+python scripts/demo_milestone3.py --limit 4          # offline vertical slice on a synthetic dataset
+```
+
+### What is fixed, and where it comes from
+
+* **Reader**: the official `run_generation.py` template for *facts extracted
+  from history chats* (the variant LongMemEval uses when retrieval returns
+  facts rather than sessions), single user message, temperature 0,
+  max_tokens 500, `Current Date` = the instance's raw `question_date`. The
+  adapter's context (one memory per line) fills the `History Chats` slot.
+* **Judge**: the official `evaluate_qa.py` prompts per question type plus the
+  abstention prompt, ported verbatim; gpt-4o-2024-08-06, temperature 0,
+  max_tokens 10, label = `"yes" in response.lower()`. `bench/prompts.py`
+  records the upstream file hashes and fetch date; all prompt hashes go into
+  RUN_START.
+* **Ingestion**: one `write()` per haystack session in file order (the README
+  states `_s` sessions are timestamp-sorted). Session dates reach the system
+  as a leading system message (`ingest.date_mode`), because mem0ai OSS rejects
+  the `timestamp` parameter. `has_answer` evidence labels are stripped and a
+  test proves they never reach the adapter.
+* **Settlement**: `wait_settled` once per instance after ingestion
+  (`settlement.policy`), so accuracy is measured on retrievable state and the
+  lag is on record for every instance.
+* **Seed**: controls question ordering; `--limit N` is the first N of that
+  order, so any subset is reproducible from (dataset sha256, seed, N). The
+  ordered id list and its digest are in RUN_START. Haystack order is never
+  shuffled: knowledge-update questions depend on it.
+
+### Run record
+
+`RUN_START` carries: run id, git commit + dirty flag, system config text and
+its sha-derived `configuration_id`, benchmark config, dataset path/sha256/size,
+selection (seed, limit, ids, digest), adapter fingerprint, reader and judge
+settings with prompt hashes, proxy instance id + log path + settings, host
+(CPU, RAM, GPU, OS, kernel, Docker, Python, package versions), and whether any
+config overrides were applied (`overrides_present`; must be false for paper
+runs). Per instance: `INSTANCE_START`, the adapter's `RESET_*`, `WRITE_SUBMIT/ACK`,
+`CANARY_*`, `SETTLEMENT_POLL`, `WRITE_SETTLED`, `READ_START/END`, then
+`CONTEXT` (the exact retrieved text), `ANSWER_START/END` (answer text, prompt
+hash, proxy request id), `JUDGE_START/END` (raw verdict, label, gold answer),
+`INSTANCE_END` (per-stage timings). Failures are `ERROR` + `INSTANCE_END` with
+`error` set and the run continues (`on_error`). `RUN_END` holds a convenience
+tally only; analysis recomputes from events.
+
+`tests/test_longmemeval_runner.py` (7 tests) proves: schema validation,
+seeded ordering and prefix-limit reproducibility, label stripping and date
+modes, verbatim prompt ports and the official label rule, one complete
+instance end to end with every stage event present and ordered, the proxy log
+showing `write/read/settle/answer/judge` all attributed to the run and
+question, and a three-instance run that records a mid-run reader failure and
+continues.
+
+### Design decisions that affect later benchmark validity
+
+17. **Official prompts only.** Reader and judge prompts are the LongMemEval
+    authors' text, not paraphrases. If a system's published number used a
+    different reader prompt, that is a documented discrepancy for Milestone 4,
+    not a reason to change the harness prompt after the fact.
+18. **Context format is the one uniform choice.** Memory systems return
+    facts, not sessions; the harness inserts them one per line into the
+    official facts template. No timestamps or scores are added by the harness.
+19. **Empty retrieval is still answered.** If the system returns nothing, the
+    reader is called with an empty `History Chats` section and `CONTEXT`
+    records `context_empty: true`, so abstention behaviour is measured rather
+    than short-circuited.
+20. **Question = session.** One instance's haystack is written under
+    `session_id = question_id` and reset before ingestion, so instances never
+    share memory state.
+21. **The convenience tally in RUN_END is not a result.** Accuracy and its
+    confidence intervals come from the analysis layer over `JUDGE_END` events.
+22. **Synthetic data is fenced off.** `--allow-synthetic` is required, the
+    manifest records `synthetic: true`, and the fake upstream's reader/judge
+    emulation is a path test, not an evaluation. The real dataset hash goes
+    into `configs/benchmarks/longmemeval_s.yaml` after download and is
+    enforced at run start.
+23. **Reproduction target is not yet set.** `published_reference.mem0` in the
+    benchmark config is null. Milestone 4 must fill it from a citable source
+    before any comparative run is inspected.
 
 ## Engineering rules (from the pre-registration)
 
