@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Raw benchmark outputs are large and immutable; they are archived outside git.
+results/raw/*
+!results/raw/.gitkeep
+
+# Local secrets
+.env

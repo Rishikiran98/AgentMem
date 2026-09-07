@@ -1,0 +1,35 @@
+[project]
+name = "memharness"
+version = "0.1.0"
+description = "Benchmark harness for 'Accuracy Is Not Enough: An Operational Characterization of Agent Memory Systems'"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "pydantic>=2.6",
+    "tiktoken>=0.7",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "openai>=1.40",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["proxy*", "adapters*", "bench*", "load*", "faults*", "analysis*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["proxy/tests", "tests"]
+addopts = "-ra"
+filterwarnings = ["ignore::DeprecationWarning"]
