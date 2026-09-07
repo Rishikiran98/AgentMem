@@ -280,6 +280,47 @@ def reranker_reply(messages: list[dict[str, Any]]) -> tuple[str, float] | None:
     return ("True" if p >= 0.5 else "False"), p
 
 
+def letta_agent_reply(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+    """Emulate a Letta agent step.  Letta sends chat completions with its tool schemas
+    (tool_choice auto).  On a fresh user turn, store the user's statement through the
+    agent's archival-insert (or core-memory) tool; after a tool result, answer with text."""
+    if not tools:
+        return None
+    names = {t.get("function", {}).get("name"): t.get("function", {}) for t in tools if isinstance(t, dict)}
+    if not any(n in names for n in ("archival_memory_insert", "core_memory_append", "memory_insert", "memory")):
+        return None
+    last = messages[-1] if messages else {}
+    if last.get("role") in ("tool", "function") or last.get("tool_call_id"):
+        return {"content": "Noted, I have stored that."}
+    # Store every user statement of this request that is not already in core memory
+    # (Letta renders the current memory blocks inside the system prompt).
+    system_text = "\n".join(m.get("content") for m in messages if m.get("role") == "system" and isinstance(m.get("content"), str))
+    user_texts: list[str] = []
+    for m in messages:
+        if m.get("role") != "user" or not isinstance(m.get("content"), str):
+            continue
+        t = m["content"]
+        try:  # legacy agents wrap user messages in JSON with a "message" field
+            obj = json.loads(t)
+            if isinstance(obj, dict) and isinstance(obj.get("message"), str):
+                t = obj["message"]
+        except (json.JSONDecodeError, TypeError):
+            pass
+        t = t.strip()
+        if t and t not in system_text and t not in user_texts:
+            user_texts.append(t)
+    if not user_texts:
+        return {"content": "Okay."}
+    user_text = "\n".join(user_texts)
+    if "archival_memory_insert" in names:
+        return {"tool_calls": [{"id": "call_" + uuid.uuid4().hex[:8], "type": "function", "function": {"name": "archival_memory_insert", "arguments": json.dumps({"content": user_text})}}]}
+    if "core_memory_append" in names:
+        return {"tool_calls": [{"id": "call_" + uuid.uuid4().hex[:8], "type": "function", "function": {"name": "core_memory_append", "arguments": json.dumps({"label": "human", "content": user_text})}}]}
+    if "memory_insert" in names:
+        return {"tool_calls": [{"id": "call_" + uuid.uuid4().hex[:8], "type": "function", "function": {"name": "memory_insert", "arguments": json.dumps({"label": "human", "new_string": user_text})}}]}
+    return {"content": "Okay."}
+
+
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse({"error": {"message": message, "type": "fake_upstream_error", "param": None, "code": None}}, status_code=status)
 
@@ -320,6 +361,15 @@ def create_fake_upstream() -> FastAPI:
         prompt_tokens = chat_prompt_tokens(messages)
         rf = body.get("response_format") if isinstance(body.get("response_format"), dict) else None
         scripted = structured_reply(rf.get("json_schema"), messages) if rf and rf.get("type") == "json_schema" else None
+        agent = letta_agent_reply(messages, body.get("tools")) if scripted is None else None
+        if agent is not None and "tool_calls" in agent:
+            prompt_tokens = chat_prompt_tokens(messages)
+            args_words = word_count(agent["tool_calls"][0]["function"]["arguments"])
+            return JSONResponse({"id": "chatcmpl-" + uuid.uuid4().hex[:12], "object": "chat.completion", "created": int(time.time()), "model": model,
+                                 "choices": [{"index": 0, "message": {"role": "assistant", "content": None, "tool_calls": agent["tool_calls"]}, "finish_reason": "tool_calls"}],
+                                 "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": args_words, "total_tokens": prompt_tokens + args_words}}, headers={"x-request-id": "up-" + uuid.uuid4().hex[:8]})
+        if agent is not None:
+            scripted = agent["content"]
         rerank = reranker_reply(messages) if body.get("logprobs") else None
         if scripted is None and rerank is not None:
             scripted = rerank[0]

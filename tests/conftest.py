@@ -66,3 +66,15 @@ def proxy_server(fake_upstream_server: LiveServer, proxy_log: Path) -> Iterator[
     srv = LiveServer(create_app(settings), _free_port()).start("/healthz")
     yield srv
     srv.stop()
+
+
+@pytest.fixture(scope="session")
+def letta_server(fake_upstream_server: LiveServer, tmp_path_factory) -> Iterator["LettaServerProcess"]:
+    """Retired Letta V1 server on embedded PostgreSQL; skipped when ./.venv-letta is absent."""
+    from tests.letta_server import LettaServerProcess, letta_env_available
+
+    if not letta_env_available():
+        pytest.skip("Letta server environment not built (run scripts/setup_letta_env.sh)")
+    srv = LettaServerProcess(tmp_path_factory.mktemp("letta"), openai_base_url=fake_upstream_server.url + "/v1").start()
+    yield srv
+    srv.stop()

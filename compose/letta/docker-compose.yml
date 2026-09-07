@@ -1,0 +1,44 @@
+# Persistence and runtime for the Letta system under test.
+#
+# Letta's open-source Python server (the "Letta V1 API server") was retired when
+# github.com/letta-ai/letta became a landing page for letta-code; 0.16.8 is the
+# last release, kept by Letta "for reproducibility".  The official image bundles
+# its own PostgreSQL (pgvector) instance; this stack pins that image, gives it a
+# dedicated volume and network, and points its model traffic at the benchmark
+# proxy on the host.  The paper must label the system
+# "Letta V1 server 0.16.8 (archived)".
+#
+#   docker compose -f compose/letta/docker-compose.yml up -d
+#   docker compose -f compose/letta/docker-compose.yml down -v   # full wipe
+services:
+  letta:
+    image: letta/letta:0.16.8
+    container_name: memharness-letta-server
+    ports:
+      - "127.0.0.1:8283:8283"
+    environment:
+      # All model calls go to the harness proxy on the host.
+      - OPENAI_API_KEY=${LETTA_PROXY_API_KEY:-sk-bench-letta}
+      - OPENAI_BASE_URL=http://host.docker.internal:8811/v1
+      - LETTA_LLM_API_LOGGING=false
+      - LETTA_DEBUG=false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - letta_pgdata:/var/lib/postgresql/data
+    networks:
+      - letta_net
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8283/v1/health/')\" || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+    restart: "no"
+
+volumes:
+  letta_pgdata:
+    name: memharness_letta_pgdata
+
+networks:
+  letta_net:
+    name: memharness_letta_net

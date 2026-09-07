@@ -20,7 +20,8 @@ must trace back to an immutable raw event.
 | 3 | LongMemEval-S runner (`bench/`) | **done, validated** on synthetic data; real dataset + provider run pending |
 | 4 | Mem0 reproduction | **pre-registered and instrumented**; canonical campaign pending dataset hash, credentials, and budget. See `docs/milestone4_reproduction.md` |
 | 5 | Graphiti / Zep OSS adapter (`adapters/zep.py`) | **done, validated** offline (Kuzu); Neo4j + real-provider run pending |
-| 6–7 | Letta adapter; S4 selection + adapter | not started; S4 deliberately unselected (`docs/system4_selection.md`) |
+| 6 | Letta adapter (`adapters/letta.py`) | **done, validated** offline against the retired V1 server on embedded PostgreSQL; real-provider run pending |
+| 7 | S4 selection + adapter | not started; S4 deliberately unselected (`docs/system4_selection.md`) |
 | 8–12 | cross-system accuracy, load, scale, faults, analysis | open-loop/fault/validation/statistics infrastructure implemented; real campaigns pending |
 
 ## Layout
@@ -38,6 +39,7 @@ adapters/       uniform async memory interface (Milestone 2)
   base.py       MemoryAdapter ABC, WriteResult/ReadResult/CanaryRecord/SettlementResult, event emission
   mem0.py       Mem0 (mem0ai OSS, in-process) adapter
   zep.py        Zep / Graphiti (graphiti-core, in-process) adapter
+  letta.py      Letta V1 server 0.16.8 (archived), via letta-client
   registry.py   config loading + adapter construction; configuration id = sha256(config bytes)
 bench/          LongMemEval-S runner (Milestone 3)
   longmemeval.py dataset schema/loader, seeded selection, synthetic stand-in
@@ -51,7 +53,7 @@ analysis/       ingest.py (run + proxy JSONL -> DataFrames), metrics.py (accurac
 configs/        committed system configurations (mem0.yaml, mem0-published-protocol.yaml) and benchmark configs (benchmarks/)
 docs/           milestone4_reproduction.md (pre-registration), examples/
 data/           gitignored datasets (scripts/fetch_longmemeval.py)
-compose/        per-system persistence stacks (compose/mem0: Qdrant; compose/zep: Neo4j 5.26)
+compose/        per-system stacks (compose/mem0: Qdrant; compose/zep: Neo4j 5.26; compose/letta: official image with bundled pgvector)
 scripts/        demo_milestone1.py, demo_milestone2.py
 tests/          adapter tests against live proxy + fake upstream servers
 docs/examples/  committed example trace
@@ -648,6 +650,82 @@ python -m bench.run --system zep --benchmark longmemeval_s --seed 42 --config co
     synchronous, so like Mem0 its lag is expected near zero; the canary
     exercises the vector and full-text indexes that Neo4j maintains
     asynchronously, which is where a real lag would appear.
+
+## Milestone 6: the Letta adapter
+
+**Which Letta.** Letta's open-source Python server was retired: `github.com/letta-ai/letta`
+is now a landing page for `letta-code` (npm), and release **0.16.8** is the last
+"Letta V1 API server", kept by Letta "for reproducibility" and marked
+unsupported. That server is what the adapter benchmarks, self-hosted from the
+official image (`compose/letta`, which bundles PostgreSQL + pgvector). Every
+fingerprint and event carries `deployment: self-hosted-letta-v1-server-archived`;
+the paper must label it "Letta V1 server 0.16.8 (archived)".
+
+**Running it locally.** The server's dependency set (`mcp` 1.12.4, `fastmcp`
+2.12.5, `openai` 2.25.0) conflicts with the harness venv, and the wheel omits the
+Alembic migration tree the Docker entrypoint runs. `scripts/setup_letta_env.sh`
+builds `./.venv-letta` from Letta's own `uv.lock` at tag 0.16.8 and installs the
+migrations from the PyPI sdist; `tests/letta_server.py` runs migrations and the
+server against an embedded PostgreSQL with pgvector (`pgserver` wheel, started
+with TCP as an unprivileged user). The harness talks to it over HTTP with
+`letta-client` 1.12.1. Tests skip when the environment is absent.
+
+| Benchmark op | Letta call |
+|---|---|
+| `reset(s)` | delete agents named `memharness-<s>`, create a fresh `letta_v1_agent` with explicit `llm_config` / `embedding_config`, verified to have no passages |
+| `write(s, msgs)` | `agents.messages.create(agent, messages=<user/system/assistant turns>, max_steps)`: one agent step; the agent's LLM decides what to store via `memory_insert` / `memory_replace`; memory writes counted from returned tool calls |
+| `read(s, q)` | core memory blocks (`[label] value`) + `passages.search(q, top_k)` archival hits, one per line |
+| canary | `passages.create(text)` (documented direct archival write, no LLM), polled through the same read, `passages.delete` afterwards; `canary_mode: message` routes it through the agent for sleep-time studies |
+| `reset_all()` | delete every `memharness-*` agent |
+
+**Attribution.** Each agent's `model_endpoint` is a proxy path-token URL
+carrying system/configuration/seed/run/session and `operation=write` (the
+agent's model calls are writes by definition); the embedding endpoint carries
+the session and gets its operation from scopes (write / read / settle). The
+server's own startup model listing uses the global key and is logged as `meta`.
+The demo shows every call attributed with exact per-session client ids.
+
+**Architectural differences recorded in the fingerprint.** Letta's third memory
+tier, recall (the message history), is only reachable through the agent's
+`conversation_search` tool; the `messages/search` API in 0.16.8 requires Letta's
+hosted Turbopuffer backend, so recall is not part of the measured read context.
+Archival tools (`archival_memory_*`) are deprecated and absent from the v1
+default tool set, so archival memory is written only by the API unless
+`agent.extra_tools` attaches them. Message timestamps are ingestion time; the
+runner's date system message is passed through as a system-role message.
+Library defaults are kept (temperature 0.7, 4096 max tokens, chunk size 300).
+
+`tests/test_letta_adapter.py` (5) and `tests/test_letta_runner.py` (1) exercise
+the real server: repeated sessions with isolation, verified reset, attribution of
+agent chat calls (path token) and embeddings (scopes), failure logging,
+`reset_all`, fingerprint with the server-assigned system prompt hash and tool
+list, the committed config, and the LongMemEval runner driving Letta unchanged.
+The fake provider emulates a v1 agent step: a `memory_insert` tool call storing
+new user statements, then a text reply.
+
+```bash
+scripts/setup_letta_env.sh                                   # one-time: ./.venv-letta from Letta's lockfile
+.venv/bin/python scripts/demo_milestone6.py --sessions 3     # offline: embedded PostgreSQL + fake provider
+docker compose -f compose/letta/docker-compose.yml up -d     # paper runs: official image, proxy on the host
+python -m bench.run --system letta --benchmark longmemeval_s --seed 42 --config configs/letta.yaml
+```
+
+### Design decisions that affect later benchmark validity
+
+32. **Letta is an agent, not a retrieval store.** Under the fixed-reader
+    protocol only core blocks and archival passages are visible; Letta's
+    intended operation lets the agent search recall itself. A `read.mode:
+    agent_answer` ablation (the Letta agent as its own reader) is a candidate
+    follow-up, clearly outside the uniform protocol.
+33. **Write cost is one agent step per write.** Each `messages.create` is at
+    least one LLM call over the full agent context (system prompt + core
+    memory + recent history), plus a call per tool round. That is Letta's
+    documented usage and what the write-cost comparison measures.
+34. **Core memory is bounded.** Blocks have character limits; on long
+    haystacks the agent must overwrite or the tool errors. The adapter records
+    tool return status and block limits so this is analysable, not hidden.
+35. **The system is unsupported upstream.** Any defect found in 0.16.8 is
+    final; the paper reports it as a property of the last released server.
 
 ## Engineering rules (from the pre-registration)
 
