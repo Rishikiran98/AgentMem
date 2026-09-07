@@ -55,6 +55,9 @@ class EmbeddedPostgres:
             if r.returncode != 0:
                 raise RuntimeError(f"initdb failed: {r.stderr}")
         opts = f"-p {self.port} -h 127.0.0.1 -k {self.sockdir} -c shared_buffers=64MB -c max_connections=100"
+        extra = os.environ.get("MEMHARNESS_PG_EXTRA_OPTS")  # diagnostics, e.g. "-c log_lock_waits=on -c log_min_duration_statement=500"
+        if extra:
+            opts += " " + extra
         r = subprocess.run([str(self.bin / "pg_ctl"), "-D", str(self.pgdata), "-l", str(self.log), "-o", opts, "-w", "-t", "60", "start"], capture_output=True, text=True, **self.run_as)
         if r.returncode != 0:
             raise RuntimeError(f"pg_ctl start failed: {r.stderr} {r.stdout}")

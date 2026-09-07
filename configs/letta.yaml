@@ -42,4 +42,16 @@ settlement:
   canary_cleanup: true
   canary_mode: passage            # passages.create (direct archival write) | message (through the agent)
 
+# Environment of the server process (compose/letta and tests/letta_server.py must
+# match; copied into the fingerprint as deployment_env).  Only the two logging
+# switches differ from server defaults.
+server_env:
+  LETTA_LLM_API_LOGGING: "false"
+  LETTA_DEBUG: "false"
+# Runtime the server must run on: the official image installs all extras, so uvicorn
+# (loop=auto) runs on uvloop.  Without uvloop the server has a 60 s per-step stall
+# (README, Milestone 6); the local launcher refuses such an environment.
+server_runtime:
+  event_loop: uvloop
+
 system_commit: null

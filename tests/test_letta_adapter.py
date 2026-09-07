@@ -13,6 +13,7 @@ from adapters.letta import LettaAdapter, LettaSettings
 from adapters.registry import build_adapter, load_config
 from proxy.fake_upstream import EMBED_DIM
 from proxy.logging import read_events
+from tests.letta_server import SERVER_ENV
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.usefixtures("letta_server")
@@ -25,6 +26,8 @@ def letta_settings(server_url: str, **over) -> LettaSettings:
         embedding={"model": "fake-embed", "embedding_dim": EMBED_DIM, "chunk_size": 300},
         agent={"include_base_tools": True, "persona": "I am a helpful assistant."},
         archival_top_k=10,
+        server_env=dict(SERVER_ENV),  # the letta_server fixture runs with exactly this env
+        server_runtime={"event_loop": "uvloop"},
     )
     kw.update(over)
     return LettaSettings(**kw)
@@ -133,3 +136,36 @@ async def test_committed_config_loads_and_builds(proxy_server, letta_server):
     finally:
         await a.reset_all()
         await a.close()
+
+
+def test_server_env_frozen_and_consistent(letta_server):
+    """The deployment env is declared once per surface and all three agree (no silent substitution);
+    the launcher verified the uvloop runtime the official image has."""
+    from tests.letta_server import REQUIRED_RUNTIME
+
+    cfg = load_config(ROOT / "configs" / "letta.yaml")
+    assert cfg["server_env"] == SERVER_ENV
+    compose = (ROOT / "compose" / "letta" / "docker-compose.yml").read_text()
+    for k, v in SERVER_ENV.items():
+        assert f"- {k}={v}" in compose, k
+    assert "LETTA_TRACK_PROVIDER_TRACE" not in compose and "LETTA_TRACK_PROVIDER_TRACE" not in SERVER_ENV
+    assert cfg["server_runtime"]["event_loop"] == REQUIRED_RUNTIME["event_loop"] == "uvloop"
+    assert letta_server.runtime["event_loop"] == "uvloop" and letta_server.runtime["uvloop"]
+    s = LettaSettings.from_config(cfg)
+    assert s.server_env == SERVER_ENV and s.server_runtime == cfg["server_runtime"]
+
+
+async def test_consecutive_writes_have_no_server_stall(adapter):
+    """Regression for the 60 s per-step stall (OpenAI client teardown deregistering a reused fd,
+    killing a NullPool asyncpg connect) that the server shows on the stdlib selector loop.
+
+    On uvloop, as in the official image, every consecutive write acks within seconds.
+    """
+    await adapter.reset("stall")
+    latencies = []
+    for i in range(6):
+        wr = await adapter.write("stall", [{"role": "user", "content": f"I keep note number {i} about Lisbon."}, {"role": "assistant", "content": "Noted."}])
+        latencies.append(wr.ack_latency_ms)
+    assert max(latencies) < 30_000, latencies
+    fp = adapter.config_fingerprint()
+    assert fp["deployment_env"] == SERVER_ENV and fp["deployment_runtime"]["event_loop"] == "uvloop"

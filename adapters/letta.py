@@ -72,6 +72,8 @@ class LettaSettings:
     max_steps: int = 10
     canary_mode: str = "passage"  # passage | message
     system_commit: str | None = None
+    server_env: dict[str, str] = field(default_factory=dict)  # frozen server process environment (documented deviations)
+    server_runtime: dict[str, str] = field(default_factory=dict)  # frozen runtime expectation (event loop)
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any]) -> "LettaSettings":
@@ -88,6 +90,8 @@ class LettaSettings:
             max_steps=int(l.get("max_steps", 10)),
             canary_mode=s.get("canary_mode", "passage"),
             system_commit=cfg.get("system_commit"),
+            server_env={str(k): str(v) for k, v in (cfg.get("server_env") or {}).items()},
+            server_runtime={str(k): str(v) for k, v in (cfg.get("server_runtime") or {}).items()},
         )
 
 
@@ -350,6 +354,8 @@ class LettaAdapter(MemoryAdapter):
             "prompts": {"system_prompt_sha256": self._probe.get("system_prompt_sha256")},
             "proxy": {"base_url": self.proxy.root, "client_ids": {"agent": "letta-agent-<session>", "embed": "letta-embed"}},
             "server_url": s.server_url,
+            "deployment_env": dict(s.server_env),
+            "deployment_runtime": {**s.server_runtime, "note": "official image installs all extras -> uvicorn loop=auto runs uvloop; on the stdlib selector loop the server stalls 60 s per step (README, Milestone 6)"},
             "seed": self.seed,
             "run_id": self.run_id,
             "python": platform.python_version(),

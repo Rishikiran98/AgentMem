@@ -20,6 +20,9 @@ services:
       # All model calls go to the harness proxy on the host.
       - OPENAI_API_KEY=${LETTA_PROXY_API_KEY:-sk-bench-letta}
       - OPENAI_BASE_URL=http://host.docker.internal:8811/v1
+      # Logging switches only (server_env in configs/letta.yaml, SERVER_ENV in
+      # tests/letta_server.py must match); every other setting is the server default.
+      # The image installs all extras, so uvicorn runs on uvloop (see README, Milestone 6).
       - LETTA_LLM_API_LOGGING=false
       - LETTA_DEBUG=false
     extra_hosts:

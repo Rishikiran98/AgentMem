@@ -695,11 +695,13 @@ default tool set, so archival memory is written only by the API unless
 runner's date system message is passed through as a system-role message.
 Library defaults are kept (temperature 0.7, 4096 max tokens, chunk size 300).
 
-`tests/test_letta_adapter.py` (5) and `tests/test_letta_runner.py` (1) exercise
+`tests/test_letta_adapter.py` (7) and `tests/test_letta_runner.py` (1) exercise
 the real server: repeated sessions with isolation, verified reset, attribution of
 agent chat calls (path token) and embeddings (scopes), failure logging,
 `reset_all`, fingerprint with the server-assigned system prompt hash and tool
-list, the committed config, and the LongMemEval runner driving Letta unchanged.
+list, the committed config, the frozen server environment (config, compose and
+test launcher must agree), a six-write no-stall regression, and the LongMemEval
+runner driving Letta unchanged.
 The fake provider emulates a v1 agent step: a `memory_insert` tool call storing
 new user statements, then a text reply.
 
@@ -709,6 +711,62 @@ scripts/setup_letta_env.sh                                   # one-time: ./.venv
 docker compose -f compose/letta/docker-compose.yml up -d     # paper runs: official image, proxy on the host
 python -m bench.run --system letta --benchmark longmemeval_s --seed 42 --config configs/letta.yaml
 ```
+
+**A 60-second stall inside the server, and why the local environment must
+mirror the image's extras.** In the first local runs the second or third
+consecutive `messages.create` on an agent blocked for 60.9 s (sometimes 121 s)
+while the proxy showed every model call completing in milliseconds. The cause
+was traced with Postgres lock logging (nothing), `strace` on the server (below)
+and Python-level hooks in the server process:
+
+1. Letta creates an OpenAI client per LLM request and never closes it. When the
+   cyclic garbage collector reclaims it, asyncio's transport finaliser closes
+   the socket (freeing its file descriptor) while the openai client's finaliser
+   schedules `httpx.AsyncClient.aclose()` as a task for a later loop iteration.
+2. Letta 0.16.8 runs SQLAlchemy with `NullPool`, so the next database session
+   (in the stalled cases the fire-and-forget provider-trace write that follows
+   every LLM call) opens a fresh asyncpg socket, which receives the freed
+   descriptor.
+3. The scheduled `aclose()` reaches anyio's `SocketStream.aclose`, whose
+   `transport.close()` deregisters *by descriptor number* on the stdlib selector
+   loop, removing the new socket's connect callback. The connect never
+   completes; asyncpg's default 60 s connect timeout fires (`Failed to write to
+   PostgresProviderTraceBackend: TimeoutError` in the server log) and the step,
+   waiting on the same loop, resumes.
+
+```
+socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC, IPPROTO_TCP) = 11          # asyncpg, new DB connection
+connect(11, {sin_port=htons(<pg>)}, 16) = -1 EINPROGRESS
+epoll_ctl(3, EPOLL_CTL_ADD, 11, {events=EPOLLOUT, ...}) = 0          # sock_connect writer registered
+shutdown(-1, SHUT_WR) = -1 EBADF                                     # anyio aclose on the already-closed httpx socket
+epoll_ctl(3, EPOLL_CTL_DEL, 11, ...) = 0                             # ...deregisters fd 11: the DB connect
+close(11)                                          <-- 60.0 s later  # asyncpg connect timeout
+```
+
+Disabling the provider trace (`LETTA_TRACK_PROVIDER_TRACE=false`) only moves
+the victim: in a control run the same timeout hit the request path's own
+database connect and the write failed with HTTP 500. The decisive difference is
+the event loop. Letta's image installs the package with `uv sync --all-extras`,
+which includes the `experimental` extra (uvloop 0.21.0), and uvicorn's
+`loop="auto"` then runs the server on uvloop, whose transports do not
+deregister by descriptor number. The local environment had been built with the
+`sqlite` and `server` extras only, so it ran the stdlib selector loop; with the
+locked uvloop added and every server setting at its default, 10/10 consecutive
+writes acked in about 1 s with zero trace failures (`scripts/letta_stall_probe.py`).
+
+Consequences: `scripts/setup_letta_env.sh` installs the `experimental` extra;
+`tests/letta_server.py` checks that the environment runs uvloop before starting
+the server and refuses otherwise (an environment on the selector loop is not the
+system under test); the frozen server environment (two logging switches only)
+and the runtime expectation are declared in `configs/letta.yaml`
+(`server_env`, `server_runtime`), mirrored in `compose/letta` and the launcher
+(a test keeps the three in agreement), and copied into every fingerprint as
+`deployment_env` / `deployment_runtime`. A six-write regression test guards the
+latency path. `tests/pg_embedded.py` accepts `MEMHARNESS_PG_EXTRA_OPTS` for this
+kind of diagnosis (e.g. `-c log_lock_waits=on`). The stall is still a real
+property of the server on the stdlib loop (any deployment that installs Letta
+without uvloop); the paper can mention it as such, with this evidence chain, but
+it is not part of the measured system.
 
 ### Design decisions that affect later benchmark validity
 
@@ -726,6 +784,13 @@ python -m bench.run --system letta --benchmark longmemeval_s --seed 42 --config 
     tool return status and block limits so this is analysable, not hidden.
 35. **The system is unsupported upstream.** Any defect found in 0.16.8 is
     final; the paper reports it as a property of the last released server.
+36. **The local environment must reproduce the image's runtime, and is checked.**
+    The 60 s stall above came from a dependency-set difference (no uvloop), not
+    from the memory system; it was found only because the proxy timestamps
+    contradicted the ack latency. Environment properties that change timing
+    (event loop, extras) are therefore frozen in the config, verified at server
+    start, and recorded in the fingerprint, so a latency distribution can always
+    be tied to the runtime that produced it.
 
 ## Engineering rules (from the pre-registration)
 
