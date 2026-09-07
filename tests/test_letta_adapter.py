@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("letta_client", reason="letta extra not installed (pip install -e '.[letta]')")
+
 from adapters.base import AdapterError, SettlementConfig
 from adapters.letta import LettaAdapter, LettaSettings
 from adapters.registry import build_adapter, load_config

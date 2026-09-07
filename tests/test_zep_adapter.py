@@ -9,6 +9,9 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("graphiti_core", reason="zep extra not installed (pip install -e '.[zep]')")
+pytest.importorskip("kuzu", reason="zep extra not installed (embedded Kuzu driver for tests)")
+
 from adapters.base import AdapterError, SettlementConfig
 from adapters.registry import build_adapter, load_config
 from adapters.zep import ZepAdapter, ZepSettings, parse_reference_time

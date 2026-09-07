@@ -4,7 +4,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
 import yaml
+
+pytest.importorskip("graphiti_core", reason="zep extra not installed (pip install -e '.[zep]')")
+pytest.importorskip("kuzu", reason="zep extra not installed (embedded Kuzu driver for tests)")
 
 from adapters.registry import load_config
 from bench.longmemeval import make_synthetic_dataset

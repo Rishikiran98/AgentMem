@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+pytest.importorskip("letta_client", reason="letta extra not installed (pip install -e '.[letta]')")
+
 from adapters.registry import load_config
 from bench.longmemeval import make_synthetic_dataset
 from bench.runner import RunConfig, Runner
