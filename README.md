@@ -4,7 +4,7 @@ Experimental infrastructure for **"Accuracy Is Not Enough: An Operational
 Characterization of Agent Memory Systems."**
 
 A reproducible benchmark harness comparing four agent-memory systems (Mem0,
-Zep/Graphiti, Letta, HIEROMEM) on LongMemEval-S accuracy *and* operational
+Graphiti/Zep OSS, Letta, and S4 (selection pending)) on LongMemEval-S accuracy *and* operational
 behaviour: latency, token cost, ingestion-to-retrievability lag, concurrency
 degradation, scaling, and failure semantics.
 
@@ -18,9 +18,9 @@ must trace back to an immutable raw event.
 | 1 | Instrumented LLM proxy (`proxy/`) | **done, validated** (see below) |
 | 2 | Mem0 adapter (`adapters/`) | **done, validated** offline; real-provider run pending |
 | 3 | LongMemEval-S runner (`bench/`) | **done, validated** on synthetic data; real dataset + provider run pending |
-| 4 | Mem0 reproduction | not started (needs dataset, key, and a cited published number) |
-| 5–7 | Zep, Letta, HIEROMEM adapters | not started |
-| 8–12 | cross-system accuracy, load driver, scale, faults, analysis | not started |
+| 4 | Mem0 reproduction | **infrastructure complete**; canonical campaign pending dataset hash, primary-source audit, credentials, and budget |
+| 5–7 | Graphiti/Zep OSS and Letta adapters; S4 selection + adapter | blocked on upstream source/package access; S4 deliberately unselected |
+| 8–12 | cross-system accuracy, load, scale, faults, analysis | open-loop/fault/validation/statistics infrastructure implemented; real campaigns pending |
 
 ## Layout
 
@@ -61,6 +61,40 @@ results/summaries/  committed compact summaries
 uv venv .venv --python 3.11 && source .venv/bin/activate
 uv pip install -e ".[dev,mem0]"
 ```
+
+## Artifact status and integrity
+
+This checkout is **infrastructure complete only for the components marked above**;
+it is not an experiment-campaign completion. No fake-provider trace is a paper
+result. The repository contains no canonical numerical finding yet, so it also
+contains no placeholder figure, table, or `paper_findings.md`. Graphiti (Zep OSS)
+and Letta remain named targets, while S4 remains unselected pending the documented
+primary-source review in `docs/system4_selection.md`.
+
+Operational work uses the coordinated-omission-safe open-loop scheduler in
+`load/`, externally controlled fault lifecycles in `faults/`, and offline,
+fail-closed validation/statistics in `analysis/`. Dedicated visibility experiments
+record lower and upper retrievability bounds; accuracy runs do not plant canaries.
+
+## Reproduction commands
+
+```bash
+make test                  # offline unit + fake-upstream integration tests
+make smoke                 # deterministic development slice; never paper evidence
+make mem0-reproduction     # requires explicit paid gates and real dataset/provider
+make accuracy              # fails closed until comparative configs are frozen
+make load                  # prints safe invocation guidance; never auto-launches load
+make scale
+make faults
+make analyze               # analysis code only; never reruns a system
+make figures               # refuses missing validated canonical data
+```
+
+Real campaigns require `PROXY_REQUIRE_ATTRIBUTION=1`,
+`PROXY_UPSTREAM_API_KEY`, `BENCH_ALLOW_PAID_RUN=1`, and `BENCH_MAX_USD`. Raw
+append-only events belong under `results/raw/`; derived summaries, figures, and
+tables belong under their corresponding `results/` directories. See
+`docs/preregistration.md`, `docs/methodology.md`, and `docs/reproduction.md`.
 
 ## Milestone 1: the instrumented proxy
 

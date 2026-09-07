@@ -25,6 +25,7 @@ from bench.longmemeval import Dataset, Instance, Session, select_instances, sele
 from bench.metadata import host_metadata
 from bench.prompts import prompt_hashes
 from bench.reader import Reader, ReaderConfig
+from bench.resume import completed_cells
 from proxy.logging import AppendOnlyJsonlLogger
 
 
@@ -49,6 +50,7 @@ class RunConfig:
     question_ids: list[str] | None = None
     overrides: dict[str, Any] | None = None
     run_id: str = field(default_factory=lambda: "")
+    resume: bool = False
 
     def __post_init__(self) -> None:
         if not self.run_id:
@@ -94,7 +96,13 @@ class Runner:
         self.dataset = dataset
         self.out_dir = Path(cfg.out_dir) / cfg.run_id
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.log = AppendOnlyJsonlLogger(self.out_dir / "run.jsonl", fsync=True, instance_id=cfg.run_id)
+        event_path = self.out_dir / "run.jsonl"
+        if event_path.exists() and event_path.stat().st_size and not cfg.resume:
+            raise ValueError(f"run {cfg.run_id!r} already exists; choose a new run_id or request exact resume")
+        self._completed: set[tuple[str, str]] = set()
+        if cfg.resume:
+            self._completed = completed_cells(event_path, run_id=cfg.run_id, configuration_id=cfg.system_config["_configuration_id"])
+        self.log = AppendOnlyJsonlLogger(event_path, fsync=True, instance_id=cfg.run_id)
         b = cfg.benchmark_config
         self.ingest = IngestConfig(**{k: v for k, v in b.get("ingest", {}).items() if k in IngestConfig.__dataclass_fields__})
         self.settle_policy = b.get("settlement", {}).get("policy", "per_instance")
@@ -157,8 +165,12 @@ class Runner:
             "host": host_metadata(Path(__file__).resolve().parents[1]),
             "started_at": utc_now_iso(),
         }
-        (self.out_dir / "manifest.json").write_text(json.dumps(manifest, indent=1, default=str))
-        self.emit("RUN_START", **manifest)
+        manifest_path = self.out_dir / "manifest.json"
+        if cfg.resume:
+            self.emit("RUN_RESUME", completed_cells=len(self._completed), configuration_id=configuration_id)
+        else:
+            manifest_path.write_text(json.dumps(manifest, indent=1, default=str))
+            self.emit("RUN_START", **manifest)
         await self.adapter.start()  # type: ignore[attr-defined]  (ADAPTER_START follows RUN_START)
         return instances
 
@@ -167,6 +179,9 @@ class Runner:
         instances = await self.setup()
         try:
             for pos, inst in enumerate(instances):
+                if (inst.question_id, "instance") in self._completed:
+                    self.emit("CELL_SKIPPED", question_id=inst.question_id, phase="instance", reason="completed_exact_resume")
+                    continue
                 await self.run_instance(inst, pos)
                 if self.tally["errors"] and self.on_error == "abort":
                     break

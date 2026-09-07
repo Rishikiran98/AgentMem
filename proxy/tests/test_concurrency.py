@@ -15,7 +15,7 @@ async def test_concurrent_header_attribution_is_isolated(client, log_path):
     for i in range(n):
         specs.append(
             {
-                "system": rng.choice(["mem0", "zep", "letta", "hieromem"]),
+                "system": rng.choice(["mem0", "graphiti", "letta", "s4"]),
                 "operation": rng.choice(["write", "read", "embed", "answer", "judge", "consolidate"]),
                 "session_id": f"sess-{i}",
                 "seed": rng.randint(0, 10_000),

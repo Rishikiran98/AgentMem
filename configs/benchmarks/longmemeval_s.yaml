@@ -15,7 +15,9 @@ ingest:
   strip_labels: true              # has_answer evidence labels are never sent to the system
 
 settlement:
-  policy: per_instance            # per_instance | per_session | none  (wait_settled after ingestion)
+  # Accuracy reproduction must not contaminate memories/ranking with artificial
+  # canaries. Dedicated visibility experiments use wait_settled explicitly.
+  policy: none                    # per_instance | per_session | none
 
 retrieval:
   query: question                 # the read query is the question text verbatim

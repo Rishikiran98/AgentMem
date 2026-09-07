@@ -35,7 +35,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--override-json", default=None, help="JSON merged over the system config; recorded as a deviation")
     ap.add_argument("--allow-synthetic", action="store_true", help="permit a synthetic dataset (tests/demos only)")
     ap.add_argument("--allow-hash-mismatch", action="store_true")
+    ap.add_argument("--run-id", default=None, help="stable identity; required with --resume")
+    ap.add_argument("--resume", action="store_true", help="resume exactly --run-id after fingerprint verification")
     args = ap.parse_args(argv)
+    if args.resume and not args.run_id:
+        ap.error("--resume requires --run-id")
 
     system_cfg = load_config(args.config)
     if system_cfg.get("system") != args.system:
@@ -71,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
         limit=args.limit,
         question_ids=args.question_ids.split(",") if args.question_ids else None,
         overrides=json.loads(args.override_json) if args.override_json else None,
+        run_id=args.run_id or "",
+        resume=args.resume,
     )
     runner = Runner(cfg, dataset)
     print(f"run_id={cfg.run_id}\nout={runner.out_dir}")

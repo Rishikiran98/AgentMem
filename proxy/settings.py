@@ -23,7 +23,7 @@ def _env_float(name: str, default: float) -> float:
     return float(raw) if raw else default
 
 
-DEFAULT_ALLOWED_SYSTEMS = ("mem0", "zep", "letta", "hieromem", "harness", "test")
+DEFAULT_ALLOWED_SYSTEMS = ("mem0", "graphiti", "letta", "s4", "harness", "test")
 
 
 @dataclass

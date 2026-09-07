@@ -120,6 +120,7 @@ class CanaryRecord:
     stored: bool | None = None  # did the system report storing it?
     memory_ids: list[str] = field(default_factory=list)
     polls: int = 0
+    previous_failed_observation_perf: float | None = None
     first_retrievable_at: str | None = None
     first_retrievable_perf: float | None = None
     settled: bool = False
@@ -136,8 +137,15 @@ class CanaryRecord:
             "acknowledged_at": self.acknowledged_at,
             "first_retrievable_at": self.first_retrievable_at,
             "polls": self.polls,
+            "poll_count": self.polls,
             "write_ack_latency_ms": self.ack_latency_ms,
             "ingestion_to_retrievability_lag_ms": _ms(self.acknowledged_perf, self.first_retrievable_perf),
+            "visibility_lower_bound_ms": (
+                _ms(self.acknowledged_perf, self.previous_failed_observation_perf)
+                if self.previous_failed_observation_perf is not None
+                else 0.0
+            ),
+            "visibility_upper_bound_ms": _ms(self.acknowledged_perf, self.first_retrievable_perf),
             "submission_to_retrievability_ms": _ms(self.submitted_perf, self.first_retrievable_perf),
             "settled": self.settled,
             "timed_out": self.timed_out,
@@ -273,7 +281,7 @@ class MemoryAdapter(ABC):
 
     async def plant_canary(self, session_id: str) -> CanaryRecord:
         """Write a uniquely identifiable fact through the system's write path."""
-        token = "memharness-canary-" + uuid.uuid4().hex[:12]
+        token = "memharness-canary-" + uuid.uuid4().hex
         text = self.canary_text(token)
         rec = CanaryRecord(session_id=session_id, canary_id=uuid.uuid4().hex, token=token, text=text, submitted_at=utc_now_iso(), submitted_perf=time.perf_counter())
         self.emit("CANARY_SUBMIT", session_id=session_id, canary_id=rec.canary_id, canary_token=token, submitted_at=rec.submitted_at)
@@ -306,11 +314,19 @@ class MemoryAdapter(ABC):
         t0 = time.perf_counter()
         result = await self.search(session_id, rec.text, operation="settle")
         visible = rec.token in result.context
-        self.emit("SETTLEMENT_POLL", session_id=session_id, canary_id=rec.canary_id, poll=rec.polls, visible=visible, read_id=result.read_id, latency_ms=_ms(t0, time.perf_counter()))
+        observed_perf = time.perf_counter()
+        self.emit(
+            "SETTLEMENT_POLL", session_id=session_id, canary_id=rec.canary_id,
+            poll=rec.polls, poll_count=rec.polls, visible=visible, read_id=result.read_id,
+            latency_ms=_ms(t0, observed_perf),
+            observation_boundary_ms=_ms(rec.acknowledged_perf, observed_perf),
+        )
         if visible:
             rec.settled = True
-            rec.first_retrievable_perf = time.perf_counter()
+            rec.first_retrievable_perf = observed_perf
             rec.first_retrievable_at = utc_now_iso()
+        else:
+            rec.previous_failed_observation_perf = observed_perf
         return visible
 
     async def wait_settled(self, session_id: str, *, timeout_s: float | None = None, poll_interval_s: float | None = None) -> SettlementResult:
