@@ -22,3 +22,4 @@ data/*
 # Local system state (Mem0 history DB, embedded stores)
 results/state/
 .venv-letta/
+openapi_letta.json
