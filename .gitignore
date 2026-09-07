@@ -15,3 +15,9 @@ results/raw/*
 
 # Local secrets
 .env
+
+# Benchmark datasets are downloaded, hashed, and never committed.
+data/*
+!data/.gitkeep
+# Local system state (Mem0 history DB, embedded stores)
+results/state/

@@ -37,7 +37,8 @@ async def test_embedding_usage_recorded(client, log_path):
     assert ev["prompt_tokens"] == 6 and ev["total_tokens"] == 6 and ev["completion_tokens"] is None
     assert ev["embedding_inputs"] == 3
     assert ev["embedding_vectors"] == 3
-    assert ev["embedding_dimensions"] == 8
+    from proxy.fake_upstream import EMBED_DIM
+    assert ev["embedding_dimensions"] == EMBED_DIM
     assert ev["operation"] == "embed"
 
 

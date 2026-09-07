@@ -1,0 +1,42 @@
+# LongMemEval-S benchmark configuration (pre-registered; committed before results are inspected).
+benchmark: longmemeval_s
+benchmark_version: longmemeval-cleaned-2025-09   # HF dataset xiaowu0162/longmemeval-cleaned
+dataset:
+  path: data/longmemeval_s_cleaned.json          # gitignored; see scripts/fetch_longmemeval.py
+  expected_sha256: null                          # fill in after download; the runner refuses a mismatch when set
+  expected_instances: 500
+
+ingest:
+  granularity: session            # one adapter.write() per haystack session (turn = one write per turn)
+  date_mode: system_message       # how a session's date reaches the memory system:
+                                  #   system_message   -> prepend {"role":"system","content":"This conversation took place on <date>."}
+                                  #   prefix_first_user-> "[<date>] " prefixed to the first user turn
+                                  #   none             -> dates are not conveyed (metadata only)
+  strip_labels: true              # has_answer evidence labels are never sent to the system
+
+settlement:
+  policy: per_instance            # per_instance | per_session | none  (wait_settled after ingestion)
+
+retrieval:
+  query: question                 # the read query is the question text verbatim
+
+reader:                           # fixed reader, official LongMemEval settings (run_generation.py)
+  model: gpt-4o-2024-08-06
+  temperature: 0.0
+  max_tokens: 500
+  prompt: longmemeval_facts       # official "facts extracted from history chats" template
+
+judge:                            # official LongMemEval judge (evaluate_qa.py)
+  model: gpt-4o-2024-08-06
+  temperature: 0.0
+  max_tokens: 10
+
+on_error: continue                # continue | abort  (per-instance failures are recorded as events either way)
+
+# Reproduction target for Milestone 4.  Must cite a concrete published source
+# (paper table / blog post URL, retrieval date) before the comparative campaign.
+published_reference:
+  mem0:
+    value: null
+    source: null
+    tolerance_abs: null

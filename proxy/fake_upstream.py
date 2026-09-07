@@ -13,6 +13,11 @@ Failure injection by model name:
     fail-timeout                  -> sleeps 30 s before answering
     slow-<ms>[-*]                 -> sleeps <ms> milliseconds before answering
 Streaming is supported (SSE, one word per chunk) with ``stream_options.include_usage``.
+
+Mem0 emulation: when the system prompt is Mem0's additive extraction prompt
+("You are a Memory Extractor"), the reply is the JSON Mem0 expects, with one
+memory per user/assistant message taken verbatim from the "## New Messages"
+section.  This exercises Mem0's real write pipeline without a real LLM.
 """
 from __future__ import annotations
 
@@ -28,7 +33,71 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-EMBED_DIM = 8
+EMBED_DIM = 64
+_STOP = {"the", "a", "an", "is", "my", "what", "of", "to", "in", "on", "and", "i", "me", "it", "do", "you", "your", "this", "that", "was", "are", "for", "by", "way"}
+
+
+def fake_embedding(text: Any) -> list[float]:
+    """Deterministic bag-of-words hashed embedding (unit norm).
+
+    Texts sharing content words get correlated vectors, so a query like "What is
+    my favorite color?" retrieves "my favorite color is teal" ahead of unrelated
+    memories.  Purely a test device: no semantic model is involved.
+    """
+    words = [w.strip(".,!?;:\"'()[]").lower() for w in str(text).split()]
+    words = [w for w in words if w and w not in _STOP]
+    vec = [0.0] * EMBED_DIM
+    for w in words or ["<empty>"]:
+        d = hashlib.sha256(w.encode()).digest()
+        for j in range(EMBED_DIM):
+            vec[j] += ((d[j % len(d)] / 255.0) * 2 - 1)
+    norm = sum(v * v for v in vec) ** 0.5 or 1.0
+    return [v / norm for v in vec]
+
+
+def _section(text: str, start: str, end: str) -> str | None:
+    i = text.find(start)
+    if i < 0:
+        return None
+    j = text.find(end, i + len(start))
+    return text[i + len(start): j if j >= 0 else None]
+
+
+def _words(text: str) -> set[str]:
+    return {w.strip(".,!?;:\"'()[]").lower() for w in text.split()} - _STOP - {""}
+
+
+def longmemeval_reader_reply(messages: list[dict[str, Any]]) -> str | None:
+    """Emulate the reader: answer with the context line that best overlaps the question."""
+    user = next((m.get("content") for m in reversed(messages) if m.get("role") == "user"), "")
+    if not isinstance(user, str) or "History Chats:" not in user or "\nQuestion: " not in user:
+        return None
+    history = (_section(user, "History Chats:\n\n", "\n\nCurrent Date:") or "").strip()
+    question = user.rsplit("\nQuestion: ", 1)[1].split("\nAnswer", 1)[0].strip()
+    lines = [l for l in history.split("\n") if l.strip()]
+    if not lines:
+        return "I don't have any information about that in our previous conversations."
+    qw = _words(question)
+    best = max(lines, key=lambda l: (len(_words(l) & qw), -len(l)))
+    if not (_words(best) & qw):
+        return "I don't have any information about that in our previous conversations."
+    return best
+
+
+def longmemeval_judge_reply(messages: list[dict[str, Any]]) -> str | None:
+    """Emulate the judge: yes iff every content word of the gold answer appears in the response."""
+    user = next((m.get("content") for m in reversed(messages) if m.get("role") == "user"), "")
+    if not isinstance(user, str) or "Model Response: " not in user:
+        return None
+    response = (user.rsplit("Model Response: ", 1)[1].rsplit("\n\n", 1)[0]).lower()
+    if user.startswith("I will give you an unanswerable question"):
+        return "yes" if ("don't have" in response or "no information" in response or "not mentioned" in response) else "no"
+    for key in ("Correct Answer: ", "Rubric: "):
+        gold = _section(user, key, "\n\nModel Response: ")
+        if gold is not None:
+            gw = _words(gold)
+            return "yes" if gw and gw <= _words(response) else "no"
+    return "no"
 
 
 def word_count(text: Any) -> int:
@@ -51,6 +120,35 @@ def embedding_prompt_tokens(inp: Any) -> int:
             return len(inp)
         return sum(embedding_prompt_tokens(x) for x in inp)
     return 0
+
+
+def mem0_extraction_reply(messages: list[dict[str, Any]]) -> str | None:
+    """Return Mem0-format extraction JSON if this looks like a Mem0 extraction call."""
+    system = next((m.get("content") for m in messages if m.get("role") == "system"), "")
+    if not isinstance(system, str) or "Memory Extractor" not in system:
+        return None
+    user = next((m.get("content") for m in reversed(messages) if m.get("role") == "user"), "")
+    if not isinstance(user, str):
+        return json.dumps({"memory": []})
+    m = re.search(r"## New Messages\n(.*?)\n\n## ", user, flags=re.S)
+    if not m:
+        return json.dumps({"memory": []})
+    section = m.group(1).strip()
+    new_messages: list[dict[str, Any]] = []
+    try:  # JSON form
+        parsed = json.loads(section)
+        if isinstance(parsed, list):
+            new_messages = [x for x in parsed if isinstance(x, dict)]
+    except json.JSONDecodeError:  # Mem0's parse_messages() form: "role: content" per line
+        for line in section.split("\n"):
+            role, sep, content = line.partition(": ")
+            if sep and role in ("user", "assistant", "system"):
+                new_messages.append({"role": role, "content": content})
+    out = []
+    for msg in new_messages:
+        if msg.get("role") in ("user", "assistant") and isinstance(msg.get("content"), str) and msg["content"].strip():
+            out.append({"id": str(len(out)), "text": msg["content"].strip(), "attributed_to": msg["role"]})
+    return json.dumps({"memory": out})
 
 
 def _error(status: int, message: str) -> JSONResponse:
@@ -91,9 +189,19 @@ def create_fake_upstream() -> FastAPI:
             return failure
         messages = body.get("messages") or []
         prompt_tokens = chat_prompt_tokens(messages)
-        n_words = min(int(body.get("max_tokens") or 16), 16)
-        words = [f"w{i + 1}" for i in range(n_words)]
-        completion = " ".join(words)
+        scripted = mem0_extraction_reply(messages)
+        if scripted is None:
+            scripted = longmemeval_reader_reply(messages)
+        if scripted is None:
+            scripted = longmemeval_judge_reply(messages)
+        if scripted is not None:
+            completion = scripted
+            words = [completion]
+            n_words = word_count(completion)
+        else:
+            n_words = min(int(body.get("max_tokens") or 16), 16)
+            words = [f"w{i + 1}" for i in range(n_words)]
+            completion = " ".join(words)
         usage = {"prompt_tokens": prompt_tokens, "completion_tokens": n_words, "total_tokens": prompt_tokens + n_words}
         rid = "chatcmpl-" + uuid.uuid4().hex[:12]
         created = int(time.time())
@@ -144,9 +252,7 @@ def create_fake_upstream() -> FastAPI:
         items: list[Any] = [inp] if isinstance(inp, str) or (isinstance(inp, list) and inp and all(isinstance(x, int) for x in inp)) else list(inp or [])
         data = []
         for i, item in enumerate(items):
-            digest = hashlib.sha256(json.dumps(item).encode()).digest()
-            vec = [((digest[j] / 255.0) * 2 - 1) for j in range(EMBED_DIM)]
-            data.append({"object": "embedding", "index": i, "embedding": vec})
+            data.append({"object": "embedding", "index": i, "embedding": fake_embedding(item)})
         pt = embedding_prompt_tokens(inp)
         return JSONResponse({"object": "list", "data": data, "model": model, "usage": {"prompt_tokens": pt, "total_tokens": pt}}, headers={"x-request-id": "up-" + uuid.uuid4().hex[:8]})
 

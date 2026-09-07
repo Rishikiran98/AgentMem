@@ -31,7 +31,17 @@ from proxy.tags import FIELD_TO_HEADER, api_key_for, encode_tags, normalize_tags
 class ProxyClient:
     def __init__(self, base_url: str, *, http: httpx.AsyncClient | None = None, timeout: float = 10.0) -> None:
         self.root = base_url.rstrip("/")
+        self._timeout = timeout
         self._http = http or httpx.AsyncClient(timeout=timeout)
+
+    @property
+    def closed(self) -> bool:
+        return self._http.is_closed
+
+    def reopen(self) -> None:
+        """Create a fresh HTTP client after ``aclose()`` (adapters restart between phases)."""
+        if self._http.is_closed:
+            self._http = httpx.AsyncClient(timeout=self._timeout)
 
     # -- static tagging ---------------------------------------------------
     @staticmethod
