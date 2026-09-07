@@ -23,7 +23,10 @@ def _env_float(name: str, default: float) -> float:
     return float(raw) if raw else default
 
 
-DEFAULT_ALLOWED_SYSTEMS = ("mem0", "graphiti", "letta", "s4", "harness", "test")
+# ``zep`` remains an attribution alias for backward compatibility with
+# Milestone-1 traces and clients.  Paper-facing system names use ``graphiti``
+# for the self-hosted Graphiti/Zep OSS target.
+DEFAULT_ALLOWED_SYSTEMS = ("mem0", "graphiti", "zep", "letta", "s4", "harness", "test")
 
 
 @dataclass

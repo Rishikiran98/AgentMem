@@ -100,10 +100,14 @@ async def test_vertical_slice_one_instance(proxy_server, proxy_log, dataset, tmp
     events = list(read_events(runner.out_dir / "run.jsonl"))
     kinds = [e["event_type"] for e in events]
     assert kinds[0] == "RUN_START" and kinds[-1] == "RUN_END"
-    for k in ("INSTANCE_START", "RESET_START", "RESET_END", "WRITE_SUBMIT", "WRITE_ACK", "INGEST_END", "CANARY_SUBMIT", "CANARY_ACK", "SETTLEMENT_POLL", "WRITE_SETTLED", "READ_START", "READ_END", "CONTEXT", "ANSWER_START", "ANSWER_END", "JUDGE_START", "JUDGE_END", "INSTANCE_END"):
+    for k in ("INSTANCE_START", "RESET_START", "RESET_END", "WRITE_SUBMIT", "WRITE_ACK", "INGEST_END", "READ_START", "READ_END", "CONTEXT", "ANSWER_START", "ANSWER_END", "JUDGE_START", "JUDGE_END", "INSTANCE_END"):
         assert k in kinds, k
+    # Accuracy reproduction deliberately uses the non-contaminating
+    # synchronization policy: no artificial canary enters the memory store.
+    for k in ("CANARY_SUBMIT", "CANARY_ACK", "SETTLEMENT_POLL", "WRITE_SETTLED"):
+        assert k not in kinds, k
     # order of the pipeline stages
-    first = {k: kinds.index(k) for k in ("INSTANCE_START", "INGEST_END", "WRITE_SETTLED", "CONTEXT", "ANSWER_END", "JUDGE_END", "INSTANCE_END")}
+    first = {k: kinds.index(k) for k in ("INSTANCE_START", "INGEST_END", "CONTEXT", "ANSWER_END", "JUDGE_END", "INSTANCE_END")}
     assert list(first.values()) == sorted(first.values())
     assert kinds.count("WRITE_SUBMIT") == len(inst.sessions) == kinds.count("WRITE_ACK")
     # every event is attributable
@@ -125,7 +129,7 @@ async def test_vertical_slice_one_instance(proxy_server, proxy_log, dataset, tmp
     jd = next(e for e in events if e["event_type"] == "JUDGE_END")
     assert jd["correct"] is True and jd["verdict_raw"] == "yes" and jd["proxy_request_id"]
     end = next(e for e in events if e["event_type"] == "INSTANCE_END")
-    assert end["correct"] is True and end["settled"] is True and all(end[k] is not None for k in ("ingest_ms", "settle_ms", "read_ms", "answer_ms", "judge_ms"))
+    assert end["correct"] is True and end["settled"] is None and all(end[k] is not None for k in ("ingest_ms", "settle_ms", "read_ms", "answer_ms", "judge_ms"))
     assert (runner.out_dir / "manifest.json").exists()
 
     # Proxy side: reader and judge calls are tagged answer/judge under system=mem0 with the question as session.
@@ -134,7 +138,8 @@ async def test_vertical_slice_one_instance(proxy_server, proxy_log, dataset, tmp
     await asyncio.sleep(0.3)
     calls = [e for e in read_events(proxy_log) if e["event_type"] == "MODEL_CALL"]
     ops = {c["operation"] for c in calls}
-    assert {"write", "read", "settle", "answer", "judge"} <= ops
+    assert {"write", "read", "answer", "judge"} <= ops
+    assert "settle" not in ops
     for c in calls:
         assert c["system"] == "mem0" and c["run_id"] == cfg.run_id and c["session_id"] == inst.question_id and c["configuration"] == system_cfg["_configuration_id"], c
     assert [c["proxy_request_id"] if False else c["request_id"] for c in calls if c["operation"] == "answer"] == [ans["proxy_request_id"]]
