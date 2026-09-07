@@ -19,7 +19,8 @@ must trace back to an immutable raw event.
 | 2 | Mem0 adapter (`adapters/`) | **done, validated** offline; real-provider run pending |
 | 3 | LongMemEval-S runner (`bench/`) | **done, validated** on synthetic data; real dataset + provider run pending |
 | 4 | Mem0 reproduction | **pre-registered and instrumented**; canonical campaign pending dataset hash, credentials, and budget. See `docs/milestone4_reproduction.md` |
-| 5–7 | Graphiti/Zep OSS and Letta adapters; S4 selection + adapter | not started; S4 deliberately unselected (`docs/system4_selection.md`) |
+| 5 | Graphiti / Zep OSS adapter (`adapters/zep.py`) | **done, validated** offline (Kuzu); Neo4j + real-provider run pending |
+| 6–7 | Letta adapter; S4 selection + adapter | not started; S4 deliberately unselected (`docs/system4_selection.md`) |
 | 8–12 | cross-system accuracy, load, scale, faults, analysis | open-loop/fault/validation/statistics infrastructure implemented; real campaigns pending |
 
 ## Layout
@@ -36,6 +37,7 @@ proxy/          instrumented OpenAI-compatible proxy (Milestone 1)
 adapters/       uniform async memory interface (Milestone 2)
   base.py       MemoryAdapter ABC, WriteResult/ReadResult/CanaryRecord/SettlementResult, event emission
   mem0.py       Mem0 (mem0ai OSS, in-process) adapter
+  zep.py        Zep / Graphiti (graphiti-core, in-process) adapter
   registry.py   config loading + adapter construction; configuration id = sha256(config bytes)
 bench/          LongMemEval-S runner (Milestone 3)
   longmemeval.py dataset schema/loader, seeded selection, synthetic stand-in
@@ -49,7 +51,7 @@ analysis/       ingest.py (run + proxy JSONL -> DataFrames), metrics.py (accurac
 configs/        committed system configurations (mem0.yaml, mem0-published-protocol.yaml) and benchmark configs (benchmarks/)
 docs/           milestone4_reproduction.md (pre-registration), examples/
 data/           gitignored datasets (scripts/fetch_longmemeval.py)
-compose/        per-system persistence stacks (compose/mem0: dedicated Qdrant)
+compose/        per-system persistence stacks (compose/mem0: Qdrant; compose/zep: Neo4j 5.26)
 scripts/        demo_milestone1.py, demo_milestone2.py
 tests/          adapter tests against live proxy + fake upstream servers
 docs/examples/  committed example trace
@@ -573,6 +575,79 @@ configs may change after the first real verdict is seen.
 27. **Analysis never reads system-reported counts.** Cost comes from proxy
     `MODEL_CALL` rows filtered by `run_id`; a foreign run's rows in the same
     proxy log are ignored (tested).
+
+## Milestone 5: the Zep / Graphiti adapter
+
+**Which Zep.** Zep Cloud performs its model calls inside Zep's infrastructure,
+so it cannot satisfy the rule that every model call goes through the proxy;
+Zep Community Edition is archived. The benchmarked system is **Graphiti**
+(`graphiti-core` 0.30.1, pinned), Zep's open-source temporal knowledge-graph
+engine and the architecture the Zep paper (arXiv 2501.13956) describes,
+running in-process with a dedicated Neo4j 5.26 server (`compose/zep`). Every
+fingerprint and event carries `deployment: self-hosted-graphiti-inprocess`.
+
+| Benchmark op | Graphiti call |
+|---|---|
+| `reset(s)` | `clear_data(driver, [s])`, then Entity/Episodic/Edge `get_by_group_ids` must be empty |
+| `write(s, msgs)` | one `add_episode()` per chat message, `episode_body="role: content"`, `source=message`, `reference_time`=session date, `group_id=s` (the format Zep's own LongMemEval evaluation code uses); the runner's date system message is not ingested, the date travels through `reference_time` |
+| `read(s, q)` | `search(q, group_ids=[s], num_results=top_k)` (hybrid BM25 + cosine, RRF); `search_` with a cross-encoder recipe when configured; context = one fact per line with its validity window, as Zep's context block shows |
+| canary | `add_triplet()`: a fact inserted through the documented direct-write API (no LLM extraction, deterministic), polled through the same search, deleted afterwards |
+| `reset_all()` | `clear_data(driver)` + `build_indices_and_constraints(delete_existing=True)` |
+
+**Proxy addition.** Graphiti's default OpenAI client uses the **Responses
+API** (`POST /v1/responses`), so the proxy now passes it through and normalises
+`input_tokens/output_tokens` to the chat names (originals kept in
+`usage_details`). Its cross-encoder reranker issues one 1-token logprob chat
+call per candidate, visible as read cost.
+
+**Attribution.** Three Graphiti objects (write / read / settle) share one
+graph driver; each has LLM, embedder and reranker clients carrying a proxy
+token with its operation; sessions attach via scopes. The demo shows every
+call attributed. Library defaults are kept (temperature 1, 16384 max tokens,
+embeddings truncated to 1024 dims, `gpt-4.1-nano` small model and reranker);
+the extraction model is pinned to `gpt-4.1-mini`, the model Graphiti's own
+LongMemEval evaluation uses.
+
+**Test backend.** No Docker here, so tests use Graphiti's embedded Kuzu driver
+(deprecated upstream, marked `deprecated_backend: true` in the fingerprint).
+Two Kuzu-driver defects in 0.30.1 needed test-only handling, both documented in
+`adapters/zep.py`: FTS indexes are created concurrently on a single-query
+connection and the failures are dropped, so the adapter re-issues Graphiti's own
+DDL sequentially for any missing index; and the driver never sets the declared
+`_database` attribute that `add_episode` reads. Neither applies to Neo4j.
+
+`tests/test_zep_adapter.py` (7) and `tests/test_zep_runner.py` (1) exercise the
+real Graphiti pipeline against the fake provider's structured-output emulation
+(entity/edge extraction, dedupe, timestamps, summaries, reranker logprobs):
+repeated sessions with isolation, verified reset, attribution of Responses /
+embeddings / reranker calls, cross-encoder recipe cost, failure logging,
+`reset_all`, fingerprint, committed config, and the LongMemEval runner driving
+Zep unchanged.
+
+```bash
+docker compose -f compose/zep/docker-compose.yml up -d
+.venv/bin/python scripts/demo_milestone5.py --sessions 3                                  # offline, Kuzu
+.venv/bin/python scripts/demo_milestone5.py --upstream https://api.openai.com/v1 --graph neo4j
+python -m bench.run --system zep --benchmark longmemeval_s --seed 42 --config configs/zep.yaml
+```
+
+### Design decisions that affect later benchmark validity
+
+28. **Graphiti, not Zep Cloud.** The paper must label the system "Zep
+    (Graphiti, self-hosted)". The Zep paper's LongMemEval numbers were
+    produced with the hosted service and its own context template; they are a
+    reference for Milestone 8, not a like-for-like target.
+29. **Per-message episodes.** This mirrors Zep's evaluation code and costs one
+    extraction pipeline per message. Mem0 ingests per session. That
+    asymmetry is each system's documented usage, and it is what the write-cost
+    comparison measures.
+30. **Facts carry validity dates in the context.** Graphiti's distinguishing
+    output is temporal validity; suppressing it would misrepresent the system.
+    `retrieval.fact_format: fact_only` exists for ablation only.
+31. **Settlement measures graph visibility.** Graphiti's `add_episode` is
+    synchronous, so like Mem0 its lag is expected near zero; the canary
+    exercises the vector and full-text indexes that Neo4j maintains
+    asynchronously, which is where a real lag would appear.
 
 ## Engineering rules (from the pre-registration)
 

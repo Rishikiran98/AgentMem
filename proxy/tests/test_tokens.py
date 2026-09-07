@@ -153,3 +153,25 @@ def test_tokenizer_never_retries_network_after_failure():
     t0 = time.perf_counter()
     assert tk.count_text_tokens("hello", "some-model-" + str(time.time())) is None
     assert time.perf_counter() - t0 < 0.01
+
+
+async def test_responses_api_usage_recorded(client, log_path):
+    """Graphiti's default client uses POST /v1/responses; usage keys are normalised."""
+    body = {"model": "fake-model", "input": [{"role": "system", "content": "a b"}, {"role": "user", "content": "c d e"}], "max_output_tokens": 50, "text": {"format": {"type": "json_schema", "name": "Weird", "schema": {"type": "object", "required": ["a"], "properties": {"a": {"type": "string"}}}}}}
+    r = await client.post("/v1/responses", json=body, headers={"X-Bench-System": "zep", "X-Bench-Operation": "write"})
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["object"] == "response" and payload["usage"]["input_tokens"] == 5
+    (ev,) = events(log_path)
+    assert ev["endpoint"] == "responses" and ev["operation"] == "write" and ev["status"] == "success"
+    assert ev["prompt_tokens"] == 5 and ev["completion_tokens"] == payload["usage"]["output_tokens"] and ev["total_tokens"] == ev["prompt_tokens"] + ev["completion_tokens"]
+    assert ev["usage_source"] == "upstream" and ev["usage_details"]["input_tokens"] == 5
+    assert ev["request_params"]["response_format"] == {"type": "json_schema", "name": "Weird"} and ev["request_params"]["max_tokens"] == 50
+    assert ev["finish_reason"] == "completed" and ev["stream"] is False
+
+
+async def test_responses_api_failure_logged(client, log_path):
+    r = await client.post("/v1/responses", json={"model": "fail-429", "input": "x"}, headers={"X-Bench-System": "zep", "X-Bench-Operation": "write"})
+    assert r.status_code == 429
+    (ev,) = events(log_path)
+    assert ev["endpoint"] == "responses" and ev["status"] == "error" and ev["http_status"] == 429
