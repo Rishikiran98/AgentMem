@@ -244,7 +244,7 @@ class Mem0Adapter(MemoryAdapter):
         async with self._scoped(op, session_id) as mem:
             res = await mem.search(query, **kwargs)
         results = res.get("results", []) if isinstance(res, dict) else []
-        hits = [ReadHit(memory_id=str(r.get("id")) if r.get("id") else None, text=str(r.get("memory", "")), score=r.get("score"), metadata=r.get("metadata")) for r in results]
+        hits = [ReadHit(memory_id=str(r.get("id")) if r.get("id") else None, text=str(r.get("memory", "")), score=r.get("score"), metadata=r.get("metadata"), created_at=r.get("created_at")) for r in results]
         return hits, res
 
     async def _canary_write_impl(self, session_id: str, text: str) -> tuple[bool, list[str]]:

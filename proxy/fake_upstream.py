@@ -70,7 +70,18 @@ def _words(text: str) -> set[str]:
 def longmemeval_reader_reply(messages: list[dict[str, Any]]) -> str | None:
     """Emulate the reader: answer with the context line that best overlaps the question."""
     user = next((m.get("content") for m in reversed(messages) if m.get("role") == "user"), "")
-    if not isinstance(user, str) or "History Chats:" not in user or "\nQuestion: " not in user:
+    if not isinstance(user, str) or "\nQuestion: " not in user:
+        return None
+    mem0_style = "Memories (sorted newest-first, grouped by date):" in user
+    if mem0_style:
+        history = (_section(user, "Memories (sorted newest-first, grouped by date):\n", "\n\nToday's Date:") or "").strip()
+        question = user.rsplit("\nQuestion: ", 1)[1].split("\n", 1)[0].strip()
+        lines = [l[2:] if l.startswith("- ") else l for l in history.split("\n") if l.strip() and not l.startswith("---") and l != "(No relevant memories found)"]
+        qw = _words(question)
+        best = max(lines, key=lambda l: (len(_words(l) & qw), -len(l))) if lines else None
+        final = best if best and (_words(best) & qw) else "The information provided is not enough"
+        return f"<mem_thinking>scanned {len(lines)} memories</mem_thinking>\nANSWER: {final}"
+    if "History Chats:" not in user:
         return None
     history = (_section(user, "History Chats:\n\n", "\n\nCurrent Date:") or "").strip()
     question = user.rsplit("\nQuestion: ", 1)[1].split("\nAnswer", 1)[0].strip()
@@ -89,15 +100,22 @@ def longmemeval_judge_reply(messages: list[dict[str, Any]]) -> str | None:
     user = next((m.get("content") for m in reversed(messages) if m.get("role") == "user"), "")
     if not isinstance(user, str) or "Model Response: " not in user:
         return None
-    response = (user.rsplit("Model Response: ", 1)[1].rsplit("\n\n", 1)[0]).lower()
+    response = (user.rsplit("Model Response: ", 1)[1].split("\n\n", 1)[0]).lower()
+    wrap = "judge_thinking" in user  # Mem0's unified judge asks for <judge_thinking> then a bare yes/no line
+
+    def verdict(v: str) -> str:
+        return f"<judge_thinking>checked</judge_thinking>\n{v}" if wrap else v
+
     if user.startswith("I will give you an unanswerable question"):
-        return "yes" if ("don't have" in response or "no information" in response or "not mentioned" in response) else "no"
+        return verdict("yes" if ("don't have" in response or "no information" in response or "not mentioned" in response) else "no")
     for key in ("Correct Answer: ", "Rubric: "):
         gold = _section(user, key, "\n\nModel Response: ")
         if gold is not None:
             gw = _words(gold)
-            return "yes" if gw and gw <= _words(response) else "no"
-    return "no"
+            if wrap and "not enough" in response and ("never mentioned" in gold.lower() or "not enough" in gold.lower()):
+                return verdict("yes")
+            return verdict("yes" if gw and gw <= _words(response) else "no")
+    return verdict("no")
 
 
 def word_count(text: Any) -> int:

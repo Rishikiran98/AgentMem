@@ -31,9 +31,10 @@ from proxy.logging import AppendOnlyJsonlLogger
 
 @dataclass
 class IngestConfig:
-    granularity: str = "session"  # session | turn
+    granularity: str = "session"  # session | turn | pair (consecutive user/assistant pairs, Mem0's protocol)
     date_mode: str = "system_message"  # system_message | prefix_first_user | none
     strip_labels: bool = True
+    skip_empty_pairs: bool = False  # Mem0's runner skips pairs where any message content is empty
 
 
 @dataclass
@@ -84,9 +85,15 @@ def split_writes(session: Session, ingest: IngestConfig) -> list[list[dict[str, 
     msgs = format_session_messages(session, ingest)
     if ingest.granularity == "session":
         return [msgs]
+    system = [m for m in msgs if m["role"] == "system"]
+    body = [m for m in msgs if m["role"] != "system"]
     if ingest.granularity == "turn":
-        system = [m for m in msgs if m["role"] == "system"]
-        return [system + [m] for m in msgs if m["role"] != "system"]
+        return [system + [m] for m in body]
+    if ingest.granularity == "pair":
+        pairs = [body[i: i + 2] for i in range(0, len(body), 2)]
+        if ingest.skip_empty_pairs:
+            pairs = [p for p in pairs if not any(not (m.get("content") or "").strip() for m in p)]
+        return [system + p for p in pairs]
     raise ValueError(f"unknown ingest.granularity {ingest.granularity!r}")
 
 
@@ -107,8 +114,8 @@ class Runner:
         self.ingest = IngestConfig(**{k: v for k, v in b.get("ingest", {}).items() if k in IngestConfig.__dataclass_fields__})
         self.settle_policy = b.get("settlement", {}).get("policy", "per_instance")
         self.on_error = b.get("on_error", "continue")
-        self.reader_cfg = ReaderConfig(**b.get("reader", {}))
-        self.judge_cfg = JudgeConfig(**b.get("judge", {}))
+        self.reader_cfg = ReaderConfig(**{k: v for k, v in b.get("reader", {}).items() if k in ReaderConfig.__dataclass_fields__})
+        self.judge_cfg = JudgeConfig(**{k: v for k, v in b.get("judge", {}).items() if k in JudgeConfig.__dataclass_fields__})
         self._ctx: dict[str, Any] = {}  # instance context merged into adapter events
         self.adapter: MemoryAdapter | None = None
         self.reader: Reader | None = None
@@ -146,6 +153,7 @@ class Runner:
             "system": cfg.system,
             "benchmark": cfg.benchmark,
             "benchmark_version": cfg.benchmark_config.get("benchmark_version"),
+            "protocol": cfg.benchmark_config.get("protocol", "longmemeval-official"),
             "seed": cfg.seed,
             "config_path": cfg.config_path,
             "configuration_id": configuration_id,
@@ -240,13 +248,14 @@ class Runner:
 
             # --- reader --------------------------------------------------------- #
             self.emit("ANSWER_START", model=self.reader_cfg.model, context_chars=len(rr.context))
-            ans = await self.reader.answer(context=rr.context, question_date=inst.question_date, question=inst.question, session_id=sid)
+            rd = await self.reader.answer(context=rr.context, question_date=inst.question_date, question=inst.question, session_id=sid, hits=rr.hits)
+            ans = rd.outcome
             timings["answer_ms"] = ans.latency_ms
-            self.emit("ANSWER_END", model=ans.model, answer=ans.text, prompt_sha256=ans.prompt_sha256, proxy_request_id=ans.proxy_request_id, upstream_request_id=ans.upstream_request_id, latency_ms=ans.latency_ms, finish_reason=ans.finish_reason)
+            self.emit("ANSWER_END", model=ans.model, answer=rd.answer, answer_raw=rd.answer_raw if rd.answer_raw != rd.answer else None, prompt_sha256=ans.prompt_sha256, prompt_chars=len(rd.prompt), proxy_request_id=ans.proxy_request_id, upstream_request_id=ans.upstream_request_id, latency_ms=ans.latency_ms, finish_reason=ans.finish_reason)
 
             # --- judge ---------------------------------------------------------- #
             self.emit("JUDGE_START", model=self.judge_cfg.model)
-            v = await self.judge.judge(question_type=inst.question_type, question=inst.question, answer=inst.answer, response=ans.text, abstention=inst.is_abstention, session_id=sid)
+            v = await self.judge.judge(question_type=inst.question_type, question=inst.question, answer=inst.answer, response=rd.answer, abstention=inst.is_abstention, session_id=sid)
             timings["judge_ms"] = v.outcome.latency_ms
             self.emit("JUDGE_END", model=v.outcome.model, verdict_raw=v.raw, correct=v.correct, gold_answer=inst.answer, prompt_sha256=v.outcome.prompt_sha256, proxy_request_id=v.outcome.proxy_request_id, latency_ms=v.outcome.latency_ms)
 

@@ -18,8 +18,8 @@ must trace back to an immutable raw event.
 | 1 | Instrumented LLM proxy (`proxy/`) | **done, validated** (see below) |
 | 2 | Mem0 adapter (`adapters/`) | **done, validated** offline; real-provider run pending |
 | 3 | LongMemEval-S runner (`bench/`) | **done, validated** on synthetic data; real dataset + provider run pending |
-| 4 | Mem0 reproduction | **infrastructure complete**; canonical campaign pending dataset hash, primary-source audit, credentials, and budget |
-| 5–7 | Graphiti/Zep OSS and Letta adapters; S4 selection + adapter | blocked on upstream source/package access; S4 deliberately unselected |
+| 4 | Mem0 reproduction | **pre-registered and instrumented**; canonical campaign pending dataset hash, credentials, and budget. See `docs/milestone4_reproduction.md` |
+| 5–7 | Graphiti/Zep OSS and Letta adapters; S4 selection + adapter | not started; S4 deliberately unselected (`docs/system4_selection.md`) |
 | 8–12 | cross-system accuracy, load, scale, faults, analysis | open-loop/fault/validation/statistics infrastructure implemented; real campaigns pending |
 
 ## Layout
@@ -45,7 +45,9 @@ bench/          LongMemEval-S runner (Milestone 3)
   runner.py     ingestion -> settlement -> retrieval -> reader -> judge; append-only run.jsonl
   run.py        CLI: python -m bench.run ...
   metadata.py   host/software metadata for RUN_START
-configs/        committed system configurations (mem0.yaml) and benchmark configs (benchmarks/longmemeval_s.yaml)
+analysis/       ingest.py (run + proxy JSONL -> DataFrames), metrics.py (accuracy/CI, settlement, latency, cost), statistics.py
+configs/        committed system configurations (mem0.yaml, mem0-published-protocol.yaml) and benchmark configs (benchmarks/)
+docs/           milestone4_reproduction.md (pre-registration), examples/
 data/           gitignored datasets (scripts/fetch_longmemeval.py)
 compose/        per-system persistence stacks (compose/mem0: dedicated Qdrant)
 scripts/        demo_milestone1.py, demo_milestone2.py
@@ -501,6 +503,76 @@ continues.
 23. **Reproduction target is not yet set.** `published_reference.mem0` in the
     benchmark config is null. Milestone 4 must fill it from a citable source
     before any comparative run is inspected.
+
+## Milestone 4: Mem0 reproduction (pre-registered)
+
+Full text: `docs/milestone4_reproduction.md`. Summary:
+
+**Published reference.** Mem0's README and `mem0ai/memory-benchmarks` report
+LongMemEval **94.4% (472/500)** at a top-200 retrieval budget on the *managed
+platform*, per type from 88.0 (multi-session) to 98.6 (single-session-user),
+with a vendor-stated ±1 point judge inconsistency and the explicit statement
+that OSS users "should expect directionally similar gains but not identical
+numbers". An OSS table exists only with non-default models (GPT-5 extraction
+and judge, Qwen embedder: 91.0%). No Mem0 number exists under the official
+LongMemEval reader/judge protocol.
+
+**Two arms, both committed before any run:**
+
+| | Arm A: official protocol | Arm B: Mem0's published protocol |
+|---|---|---|
+| configs | `configs/mem0.yaml` + `configs/benchmarks/longmemeval_s.yaml` | `configs/mem0-published-protocol.yaml` + `configs/benchmarks/longmemeval_s_mem0protocol.yaml` |
+| ingestion | per session, date as system message | per user/assistant pair, no date (their OSS server forwards none) |
+| retrieval | top_k 20, threshold 0.1 (library defaults) | top_k 200 |
+| reader / judge | official LongMemEval templates, 500 / 10 tokens | Mem0's `ANSWER_GENERATION_PROMPT` and unified `JUDGE_PROMPT` verbatim (Apache-2.0, hashed), their post-processing and verdict parser |
+
+**Comparison rule (fixed):** reproduced iff |accuracy − 0.944| ≤ 0.03 or 0.944
+lies inside the run's Wilson 95% interval; errored instances reported
+separately. Arm B once over 500 instances; Arm A at three seeds.
+
+**Discrepancies already established from source** (each is a row in the
+automatic checklist): platform-only optimizations; their OSS server pins a git
+branch that no longer exists; that server calls `search(limit=…, user_id=…)`,
+which mem0ai 2.0.20 rejects/ignores, and never forwards session dates; Mem0's
+answer prompt contains LongMemEval-item-specific rules and its judge prompt
+instructs leniency; 10-token vs free-form judge output; top-200 vs default 20;
+pair vs session ingestion; spaCy/fastembed prerequisites for hybrid retrieval.
+
+**Tooling.** `analysis/` derives accuracy with Wilson intervals (overall, per
+type, abstention), settlement lag, write/read latency percentiles, and
+token/call cost by operation, from `run.jsonl` plus the proxy log joined on
+`run_id`. `scripts/reproduce_mem0.py` turns one or more run directories into
+`results/summaries/mem0-reproduction-<stamp>.{md,json}` with the verdict and
+the discrepancy checklist. `scripts/demo_milestone4.py` runs both arms through
+`bench.run` and the report; offline it uses the synthetic dataset and the
+verdict is `not_applicable_synthetic_dataset` by construction.
+
+```bash
+python scripts/demo_milestone4.py --limit 5                                  # apparatus check (offline)
+python scripts/reproduce_mem0.py --run results/raw/runs/<B> --run results/raw/runs/<A> --proxy-log results/raw/proxy/m4.jsonl
+```
+
+**Execution status: not executed.** This environment cannot reach the dataset
+host, the model provider, or a Docker daemon. The protocol in the document is
+the exact command sequence to run once those are available; nothing in the
+configs may change after the first real verdict is seen.
+
+### Design decisions that affect later benchmark validity
+
+24. **Reproduction target is Mem0's own protocol, not the official one.**
+    Because no official-protocol number exists, Arm B reproduces what Mem0
+    published, and Arm A is a new measurement. The A–B gap is itself a
+    result: the effect of prompt engineering and retrieval depth on the same
+    system.
+25. **Arm B mirrors their OSS code path, not their platform.** Where their
+    runner and their server disagree (dates, `limit`), Arm B follows what the
+    OSS server actually does, and the checklist says so.
+26. **Vendor doc inconsistency on the reader/judge model** (gpt-4o in the
+    README, gpt-5 in the runner default) is resolved in advance to gpt-4o; any
+    gpt-5 run is a labelled follow-up.
+27. **Analysis never reads system-reported counts.** Cost comes from proxy
+    `MODEL_CALL` rows filtered by `run_id`; a foreign run's rows in the same
+    proxy log are ignored (tested).
 
 ## Engineering rules (from the pre-registration)
 

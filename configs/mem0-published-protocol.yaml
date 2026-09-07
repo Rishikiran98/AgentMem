@@ -1,0 +1,47 @@
+# Mem0 configured as in Mem0's own published LongMemEval evaluation
+# (github.com/mem0ai/memory-benchmarks, OSS backend), for Milestone 4 Arm B.
+# Identical to configs/mem0.yaml except where noted.
+system: mem0
+adapter: adapters.mem0:Mem0Adapter
+description: >
+  Mem0 OSS in-process with a dedicated Qdrant server, models via the proxy,
+  retrieval depth 200 as used for Mem0's published numbers (their runner passes
+  top_k=200; the OSS server forwards it as `limit`, which mem0ai 2.0.20's
+  search() ignores, so the value is set explicitly here).
+
+mem0:
+  llm:
+    provider: openai
+    model: gpt-4o-mini          # memory-benchmarks configs/openai.yaml default
+    temperature: 0.1            # memory-benchmarks configs/openai.yaml
+    max_tokens: 2000
+    top_p: 0.1
+  embedder:
+    provider: openai
+    model: text-embedding-3-small
+    embedding_dims: 1536
+  vector_store:
+    provider: qdrant
+    mode: server
+    host: 127.0.0.1
+    port: 6333
+    path: null
+    collection_name: memharness_mem0_pub
+    embedding_model_dims: 1536
+    on_disk: true
+  history_db_path: results/state/mem0-published-protocol/history.db
+  infer: true
+  custom_instructions: null
+
+retrieval:
+  top_k: 200                    # Mem0's published "top_200 retrieval budget"
+  threshold: 0.1                # mem0ai default; memory-benchmarks does not override it
+  rerank: false                 # memory-benchmarks default (--rerank not set)
+
+settlement:
+  timeout_s: 30
+  poll_interval_s: 0.25
+  canary_cleanup: true
+  canary_infer: false
+
+system_commit: null
