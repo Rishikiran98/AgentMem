@@ -63,6 +63,9 @@ def settlement(trace: RunTrace) -> dict[str, Any]:
 
 
 def latency(trace: "RunTrace | list[float]") -> dict[str, Any]:
+    """Write-ack / read / stage latency percentiles of a trace; for a plain list of samples see ``latency_of``."""
+    if not isinstance(trace, RunTrace):
+        return latency_of(list(trace))
     out: dict[str, Any] = {}
     acks = trace.of("WRITE_ACK")
     reads = trace.of("READ_END")

@@ -47,6 +47,7 @@ async def synthetic_run(proxy_server, proxy_log, tmp_path):
     bcfg = yaml.safe_load((ROOT / "configs/benchmarks/longmemeval_s.yaml").read_text())
     bcfg["reader"]["model"] = "fake-model"
     bcfg["judge"]["model"] = "fake-model"
+    bcfg["settlement"]["policy"] = "per_instance"  # a visibility-experiment configuration: accuracy runs plant no canaries
     overrides = {"mem0": {"llm": {"model": "fake-model"}, "embedder": {"model": "fake-embed", "embedding_dims": None}, "vector_store": {"mode": "embedded", "path": str(tmp_path / "q"), "embedding_model_dims": EMBED_DIM}, "history_db_path": str(tmp_path / "h.db")}}
     cfg = RunConfig(system="mem0", benchmark="longmemeval_s", seed=1, config_path="configs/mem0.yaml", system_config=system_cfg, benchmark_config=bcfg, proxy_url=proxy_server.url, out_dir=tmp_path / "runs", limit=4, overrides=overrides)
     runner = Runner(cfg, ds)

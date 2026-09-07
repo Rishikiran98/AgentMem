@@ -18,7 +18,10 @@ ingest:
   skip_empty_pairs: true          # their loop skips pairs with any empty content
 
 settlement:
-  policy: per_instance            # harness addition; their runner has no settlement check (sync OSS add)
+  # Same policy as Arm A: accuracy runs plant no canaries (they would contaminate
+  # memories and ranking).  Their runner has no settlement check either (sync OSS add);
+  # visibility experiments call wait_settled explicitly.
+  policy: none                    # per_instance | per_session | none
 
 retrieval:
   query: question                 # search(question_text, user_id, top_k=200)

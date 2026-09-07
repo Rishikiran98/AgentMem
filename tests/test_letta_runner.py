@@ -31,8 +31,10 @@ async def test_letta_vertical_slice(proxy_server, proxy_log, letta_server, tmp_p
     assert summary["instances"] == 1 and summary["errors"] == 0
     events = list(read_events(runner.out_dir / "run.jsonl"))
     kinds = [e["event_type"] for e in events]
-    for k in ("WRITE_ACK", "WRITE_SETTLED", "CONTEXT", "ANSWER_END", "JUDGE_END", "INSTANCE_END"):
+    for k in ("WRITE_ACK", "CONTEXT", "ANSWER_END", "JUDGE_END", "INSTANCE_END"):
         assert k in kinds, k
+    # accuracy runs plant no canaries (settlement.policy: none); visibility experiments call wait_settled explicitly
+    assert not {"CANARY_SUBMIT", "CANARY_ACK", "SETTLEMENT_POLL", "WRITE_SETTLED"} & set(kinds)
     assert events[0]["adapter_fingerprint"]["deployment"] == "self-hosted-letta-v1-server-archived"
     acks = [e for e in events if e["event_type"] == "WRITE_ACK"]
     assert len(acks) == len(inst.sessions) and any(a["memories_added"] >= 1 for a in acks)  # repeated filler is deduplicated by the (fake) agent
@@ -41,5 +43,5 @@ async def test_letta_vertical_slice(proxy_server, proxy_log, letta_server, tmp_p
     assert summary["correct"] == 1
     await asyncio.sleep(0.3)
     calls = [e for e in read_events(proxy_log) if e["event_type"] == "MODEL_CALL"]
-    assert {c["operation"] for c in calls} >= {"write", "read", "settle", "answer", "judge"}
+    assert {c["operation"] for c in calls} >= {"write", "read", "answer", "judge"} and "settle" not in {c["operation"] for c in calls}
     assert all(c["system"] == "letta" and c["session_id"] == inst.question_id for c in calls)

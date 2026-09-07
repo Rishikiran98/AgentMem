@@ -29,8 +29,10 @@ async def test_zep_vertical_slice(proxy_server, proxy_log, tmp_path):
     assert summary["instances"] == 1 and summary["errors"] == 0
     events = list(read_events(runner.out_dir / "run.jsonl"))
     kinds = [e["event_type"] for e in events]
-    for k in ("WRITE_ACK", "WRITE_SETTLED", "CONTEXT", "ANSWER_END", "JUDGE_END", "INSTANCE_END"):
+    for k in ("WRITE_ACK", "CONTEXT", "ANSWER_END", "JUDGE_END", "INSTANCE_END"):
         assert k in kinds, k
+    # accuracy runs plant no canaries (settlement.policy: none); visibility experiments call wait_settled explicitly
+    assert not {"CANARY_SUBMIT", "CANARY_ACK", "SETTLEMENT_POLL", "WRITE_SETTLED"} & set(kinds)
     start = events[0]
     assert start["adapter_fingerprint"]["system"] == "zep" and start["adapter_fingerprint"]["deployment"] == "self-hosted-graphiti-inprocess"
     acks = [e for e in events if e["event_type"] == "WRITE_ACK"]
@@ -43,6 +45,6 @@ async def test_zep_vertical_slice(proxy_server, proxy_log, tmp_path):
     assert summary["correct"] == 1
     await asyncio.sleep(0.3)
     calls = [e for e in read_events(proxy_log) if e["event_type"] == "MODEL_CALL"]
-    assert {c["operation"] for c in calls} >= {"write", "read", "settle", "answer", "judge"}
+    assert {c["operation"] for c in calls} >= {"write", "read", "answer", "judge"} and "settle" not in {c["operation"] for c in calls}
     assert all(c["system"] == "zep" and c["session_id"] == inst.question_id for c in calls)
     assert any(c["endpoint"] == "responses" for c in calls)
