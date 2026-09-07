@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import subprocess
 import sys
@@ -95,7 +96,10 @@ async def test_arm_b_end_to_end_and_report(proxy_server, proxy_log, tmp_path):
     items = {row["item"]: row for row in rp["checklist"]}
     assert items["reader_prompt"]["match"] is True and items["judge_prompt"]["match"] is True and items["retrieval_top_k"]["match"] is True and items["ingest_granularity"]["match"] is True
     assert items["deployment"]["match"] is False and items["overrides_present"]["match"] is False and items["dataset"]["match"] is None
-    assert items["bm25_hybrid"]["match"] is False  # fastembed absent in this environment; recorded, not hidden
+    # BM25 hybrid search follows whether fastembed is installed (mem0ai[extras]); the checklist records the
+    # environment rather than assuming it, so the expectation is derived the same way
+    fastembed_present = importlib.util.find_spec("fastembed") is not None
+    assert items["bm25_hybrid"]["this_run"] is fastembed_present and items["bm25_hybrid"]["match"] is fastembed_present
     assert rp["summary"]["cost"]["available"] and rp["summary"]["cost"]["unattributed"] == 0
     md = (out_dir / "mem0-reproduction-test.md").read_text()
     assert "Discrepancy checklist" in md and "not_applicable_synthetic_dataset" in md
