@@ -1,0 +1,49 @@
+# Zep / Graphiti benchmark configuration.
+# System under test: Graphiti (getzep/graphiti, Zep's open-source temporal
+# knowledge-graph engine) running in-process with a dedicated Neo4j server
+# (compose/zep).  Zep Cloud is NOT benchmarked: its model calls cannot be routed
+# through the proxy.  Library defaults are kept unless noted.
+system: zep
+adapter: adapters.zep:ZepAdapter
+description: >
+  Graphiti self-hosted in-process with a dedicated Neo4j 5.26 server; OpenAI
+  models via the proxy (Responses API, Graphiti's default client); per-message
+  episodes as in Zep's own LongMemEval evaluation code; default hybrid
+  edge search with RRF.
+
+graphiti:
+  graph_store:
+    provider: neo4j             # neo4j (compose/zep) | kuzu (embedded, tests only; deprecated upstream)
+    uri: bolt://127.0.0.1:7687
+    user: neo4j
+    password: memharness-zep
+    database: neo4j
+    path: null                  # kuzu database path when provider=kuzu
+  llm:
+    client: openai_responses    # Graphiti's default OpenAIClient (Responses API); openai_generic = chat completions
+    model: gpt-4.1-mini         # model used by Graphiti's own LongMemEval eval (tests/evals/eval_e2e_graph_building.py)
+    small_model: gpt-4.1-nano   # graphiti-core default
+    temperature: 1.0            # graphiti-core default (DEFAULT_TEMPERATURE = 1)
+    max_tokens: 16384           # graphiti-core default
+  embedder:
+    model: text-embedding-3-small
+    embedding_dim: 1024         # graphiti-core default: vectors are truncated to 1024 dims
+  reranker:
+    provider: openai            # OpenAIRerankerClient (logprob True/False scoring); used only by *_cross_encoder recipes
+    model: gpt-4.1-nano         # graphiti-core default
+  ingest:
+    episode_granularity: message   # one add_episode per chat message (Zep's eval); batch = one episode per write
+    source_description: chat message
+
+retrieval:
+  recipe: edge_hybrid_rrf       # graphiti.search() default (BM25 + cosine, RRF); *_cross_encoder recipes call the reranker
+  top_k: 10                     # graphiti.search() default num_results
+  fact_format: fact_with_dates  # append "(valid: <date> - <date|present>)" as Zep's context block does; fact_only disables
+
+settlement:
+  timeout_s: 60
+  poll_interval_s: 0.5
+  canary_cleanup: true
+  canary_mode: triplet          # add_triplet(): direct fact insert without LLM extraction; episode = through add_episode
+
+system_commit: null

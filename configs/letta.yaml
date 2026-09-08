@@ -1,0 +1,57 @@
+# Letta benchmark configuration.
+# System under test: the retired Letta V1 API server, release 0.16.8 (the last
+# one; github.com/letta-ai/letta is now a landing page for letta-code), self-hosted
+# from the official image (compose/letta) which bundles PostgreSQL + pgvector.
+# All agent model calls and embeddings go through the proxy via per-agent
+# endpoints.  Library defaults are kept unless noted.
+system: letta
+adapter: adapters.letta:LettaAdapter
+description: >
+  Letta V1 server 0.16.8 (archived), letta_v1_agent with the default memory
+  tools (memory_insert/memory_replace/conversation_search), core memory blocks
+  human+persona, archival memory via pgvector; OpenAI models via the proxy.
+
+letta:
+  server_url: http://127.0.0.1:8283
+  agent:
+    agent_type: letta_v1_agent    # server default in 0.16.8
+    include_base_tools: true      # -> memory_insert, memory_replace, conversation_search
+    extra_tools: []               # e.g. [archival_memory_insert, archival_memory_search] (deprecated in 0.16.8)
+    enable_sleeptime: false       # server default; true enables asynchronous memory consolidation
+    persona: "I am a helpful assistant with long-term memory."
+    human_initial: ""
+    request_timeout_s: 600
+  llm:
+    model: gpt-4o-mini            # agent (memory-management) model
+    temperature: 0.7              # letta LLMConfig default
+    max_tokens: 4096              # letta LLMConfig default
+    context_window: 128000
+  embedding:
+    model: text-embedding-3-small
+    embedding_dim: 1536
+    chunk_size: 300               # letta default embedding_chunk_size
+  max_steps: 10                   # agent steps per messages.create (letta DEFAULT_MAX_STEPS)
+
+retrieval:
+  include_core_blocks: true       # in-context memory blocks are always part of Letta's context
+  archival_top_k: 10              # passages.search top_k (letta RETRIEVAL_QUERY_DEFAULT_PAGE_SIZE is server-side default)
+
+settlement:
+  timeout_s: 60
+  poll_interval_s: 0.5
+  canary_cleanup: true
+  canary_mode: passage            # passages.create (direct archival write) | message (through the agent)
+
+# Environment of the server process (compose/letta and tests/letta_server.py must
+# match; copied into the fingerprint as deployment_env).  Only the two logging
+# switches differ from server defaults.
+server_env:
+  LETTA_LLM_API_LOGGING: "false"
+  LETTA_DEBUG: "false"
+# Runtime the server must run on: the official image installs all extras, so uvicorn
+# (loop=auto) runs on uvloop.  Without uvloop the server has a 60 s per-step stall
+# (README, Milestone 6); the local launcher refuses such an environment.
+server_runtime:
+  event_loop: uvloop
+
+system_commit: null

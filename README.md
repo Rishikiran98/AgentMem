@@ -18,8 +18,10 @@ must trace back to an immutable raw event.
 | 1 | Instrumented LLM proxy (`proxy/`) | **done, validated** (see below) |
 | 2 | Mem0 adapter (`adapters/`) | **done, validated** offline; real-provider run pending |
 | 3 | LongMemEval-S runner (`bench/`) | **done, validated** on synthetic data; real dataset + provider run pending |
-| 4 | Mem0 reproduction | **infrastructure complete**; canonical campaign pending dataset hash, primary-source audit, credentials, and budget |
-| 5–7 | Graphiti/Zep OSS and Letta adapters; S4 selection + adapter | blocked on upstream source/package access; S4 deliberately unselected |
+| 4 | Mem0 reproduction | **pre-registered and instrumented**; canonical campaign pending dataset hash, credentials, and budget. See `docs/milestone4_reproduction.md` |
+| 5 | Graphiti / Zep OSS adapter (`adapters/zep.py`) | **done, validated** offline (Kuzu); Neo4j + real-provider run pending |
+| 6 | Letta adapter (`adapters/letta.py`) | **done, validated** offline against the retired V1 server on embedded PostgreSQL; real-provider run pending |
+| 7 | S4 selection + adapter | not started; S4 deliberately unselected (`docs/system4_selection.md`) |
 | 8–12 | cross-system accuracy, load, scale, faults, analysis | open-loop/fault/validation/statistics infrastructure implemented; real campaigns pending |
 
 ## Layout
@@ -36,6 +38,8 @@ proxy/          instrumented OpenAI-compatible proxy (Milestone 1)
 adapters/       uniform async memory interface (Milestone 2)
   base.py       MemoryAdapter ABC, WriteResult/ReadResult/CanaryRecord/SettlementResult, event emission
   mem0.py       Mem0 (mem0ai OSS, in-process) adapter
+  zep.py        Zep / Graphiti (graphiti-core, in-process) adapter
+  letta.py      Letta V1 server 0.16.8 (archived), via letta-client
   registry.py   config loading + adapter construction; configuration id = sha256(config bytes)
 bench/          LongMemEval-S runner (Milestone 3)
   longmemeval.py dataset schema/loader, seeded selection, synthetic stand-in
@@ -45,9 +49,11 @@ bench/          LongMemEval-S runner (Milestone 3)
   runner.py     ingestion -> settlement -> retrieval -> reader -> judge; append-only run.jsonl
   run.py        CLI: python -m bench.run ...
   metadata.py   host/software metadata for RUN_START
-configs/        committed system configurations (mem0.yaml) and benchmark configs (benchmarks/longmemeval_s.yaml)
+analysis/       ingest.py (run + proxy JSONL -> DataFrames), metrics.py (accuracy/CI, settlement, latency, cost), statistics.py
+configs/        committed system configurations (mem0.yaml, mem0-published-protocol.yaml) and benchmark configs (benchmarks/)
+docs/           milestone4_reproduction.md (pre-registration), examples/
 data/           gitignored datasets (scripts/fetch_longmemeval.py)
-compose/        per-system persistence stacks (compose/mem0: dedicated Qdrant)
+compose/        per-system stacks (compose/mem0: Qdrant; compose/zep: Neo4j 5.26; compose/letta: official image with bundled pgvector)
 scripts/        demo_milestone1.py, demo_milestone2.py
 tests/          adapter tests against live proxy + fake upstream servers
 docs/examples/  committed example trace
@@ -501,6 +507,290 @@ continues.
 23. **Reproduction target is not yet set.** `published_reference.mem0` in the
     benchmark config is null. Milestone 4 must fill it from a citable source
     before any comparative run is inspected.
+
+## Milestone 4: Mem0 reproduction (pre-registered)
+
+Full text: `docs/milestone4_reproduction.md`. Summary:
+
+**Published reference.** Mem0's README and `mem0ai/memory-benchmarks` report
+LongMemEval **94.4% (472/500)** at a top-200 retrieval budget on the *managed
+platform*, per type from 88.0 (multi-session) to 98.6 (single-session-user),
+with a vendor-stated ±1 point judge inconsistency and the explicit statement
+that OSS users "should expect directionally similar gains but not identical
+numbers". An OSS table exists only with non-default models (GPT-5 extraction
+and judge, Qwen embedder: 91.0%). No Mem0 number exists under the official
+LongMemEval reader/judge protocol.
+
+**Two arms, both committed before any run:**
+
+| | Arm A: official protocol | Arm B: Mem0's published protocol |
+|---|---|---|
+| configs | `configs/mem0.yaml` + `configs/benchmarks/longmemeval_s.yaml` | `configs/mem0-published-protocol.yaml` + `configs/benchmarks/longmemeval_s_mem0protocol.yaml` |
+| ingestion | per session, date as system message | per user/assistant pair, no date (their OSS server forwards none) |
+| retrieval | top_k 20, threshold 0.1 (library defaults) | top_k 200 |
+| reader / judge | official LongMemEval templates, 500 / 10 tokens | Mem0's `ANSWER_GENERATION_PROMPT` and unified `JUDGE_PROMPT` verbatim (Apache-2.0, hashed), their post-processing and verdict parser |
+
+**Comparison rule (fixed):** reproduced iff |accuracy − 0.944| ≤ 0.03 or 0.944
+lies inside the run's Wilson 95% interval; errored instances reported
+separately. Arm B once over 500 instances; Arm A at three seeds.
+
+**Discrepancies already established from source** (each is a row in the
+automatic checklist): platform-only optimizations; their OSS server pins a git
+branch that no longer exists; that server calls `search(limit=…, user_id=…)`,
+which mem0ai 2.0.20 rejects/ignores, and never forwards session dates; Mem0's
+answer prompt contains LongMemEval-item-specific rules and its judge prompt
+instructs leniency; 10-token vs free-form judge output; top-200 vs default 20;
+pair vs session ingestion; spaCy/fastembed prerequisites for hybrid retrieval.
+
+**Tooling.** `analysis/` derives accuracy with Wilson intervals (overall, per
+type, abstention), settlement lag, write/read latency percentiles, and
+token/call cost by operation, from `run.jsonl` plus the proxy log joined on
+`run_id`. `scripts/reproduce_mem0.py` turns one or more run directories into
+`results/summaries/mem0-reproduction-<stamp>.{md,json}` with the verdict and
+the discrepancy checklist. `scripts/demo_milestone4.py` runs both arms through
+`bench.run` and the report; offline it uses the synthetic dataset and the
+verdict is `not_applicable_synthetic_dataset` by construction.
+
+```bash
+python scripts/demo_milestone4.py --limit 5                                  # apparatus check (offline)
+python scripts/reproduce_mem0.py --run results/raw/runs/<B> --run results/raw/runs/<A> --proxy-log results/raw/proxy/m4.jsonl
+```
+
+**Execution status: not executed.** This environment cannot reach the dataset
+host, the model provider, or a Docker daemon. The protocol in the document is
+the exact command sequence to run once those are available; nothing in the
+configs may change after the first real verdict is seen.
+
+### Design decisions that affect later benchmark validity
+
+24. **Reproduction target is Mem0's own protocol, not the official one.**
+    Because no official-protocol number exists, Arm B reproduces what Mem0
+    published, and Arm A is a new measurement. The A–B gap is itself a
+    result: the effect of prompt engineering and retrieval depth on the same
+    system.
+25. **Arm B mirrors their OSS code path, not their platform.** Where their
+    runner and their server disagree (dates, `limit`), Arm B follows what the
+    OSS server actually does, and the checklist says so.
+26. **Vendor doc inconsistency on the reader/judge model** (gpt-4o in the
+    README, gpt-5 in the runner default) is resolved in advance to gpt-4o; any
+    gpt-5 run is a labelled follow-up.
+27. **Analysis never reads system-reported counts.** Cost comes from proxy
+    `MODEL_CALL` rows filtered by `run_id`; a foreign run's rows in the same
+    proxy log are ignored (tested).
+
+## Milestone 5: the Zep / Graphiti adapter
+
+**Which Zep.** Zep Cloud performs its model calls inside Zep's infrastructure,
+so it cannot satisfy the rule that every model call goes through the proxy;
+Zep Community Edition is archived. The benchmarked system is **Graphiti**
+(`graphiti-core` 0.30.1, pinned), Zep's open-source temporal knowledge-graph
+engine and the architecture the Zep paper (arXiv 2501.13956) describes,
+running in-process with a dedicated Neo4j 5.26 server (`compose/zep`). Every
+fingerprint and event carries `deployment: self-hosted-graphiti-inprocess`.
+
+| Benchmark op | Graphiti call |
+|---|---|
+| `reset(s)` | `clear_data(driver, [s])`, then Entity/Episodic/Edge `get_by_group_ids` must be empty |
+| `write(s, msgs)` | one `add_episode()` per chat message, `episode_body="role: content"`, `source=message`, `reference_time`=session date, `group_id=s` (the format Zep's own LongMemEval evaluation code uses); the runner's date system message is not ingested, the date travels through `reference_time` |
+| `read(s, q)` | `search(q, group_ids=[s], num_results=top_k)` (hybrid BM25 + cosine, RRF); `search_` with a cross-encoder recipe when configured; context = one fact per line with its validity window, as Zep's context block shows |
+| canary | `add_triplet()`: a fact inserted through the documented direct-write API (no LLM extraction, deterministic), polled through the same search, deleted afterwards |
+| `reset_all()` | `clear_data(driver)` + `build_indices_and_constraints(delete_existing=True)` |
+
+**Proxy addition.** Graphiti's default OpenAI client uses the **Responses
+API** (`POST /v1/responses`), so the proxy now passes it through and normalises
+`input_tokens/output_tokens` to the chat names (originals kept in
+`usage_details`). Its cross-encoder reranker issues one 1-token logprob chat
+call per candidate, visible as read cost.
+
+**Attribution.** Three Graphiti objects (write / read / settle) share one
+graph driver; each has LLM, embedder and reranker clients carrying a proxy
+token with its operation; sessions attach via scopes. The demo shows every
+call attributed. Library defaults are kept (temperature 1, 16384 max tokens,
+embeddings truncated to 1024 dims, `gpt-4.1-nano` small model and reranker);
+the extraction model is pinned to `gpt-4.1-mini`, the model Graphiti's own
+LongMemEval evaluation uses.
+
+**Test backend.** No Docker here, so tests use Graphiti's embedded Kuzu driver
+(deprecated upstream, marked `deprecated_backend: true` in the fingerprint).
+Two Kuzu-driver defects in 0.30.1 needed test-only handling, both documented in
+`adapters/zep.py`: FTS indexes are created concurrently on a single-query
+connection and the failures are dropped, so the adapter re-issues Graphiti's own
+DDL sequentially for any missing index; and the driver never sets the declared
+`_database` attribute that `add_episode` reads. Neither applies to Neo4j.
+
+`tests/test_zep_adapter.py` (7) and `tests/test_zep_runner.py` (1) exercise the
+real Graphiti pipeline against the fake provider's structured-output emulation
+(entity/edge extraction, dedupe, timestamps, summaries, reranker logprobs):
+repeated sessions with isolation, verified reset, attribution of Responses /
+embeddings / reranker calls, cross-encoder recipe cost, failure logging,
+`reset_all`, fingerprint, committed config, and the LongMemEval runner driving
+Zep unchanged.
+
+```bash
+docker compose -f compose/zep/docker-compose.yml up -d
+.venv/bin/python scripts/demo_milestone5.py --sessions 3                                  # offline, Kuzu
+.venv/bin/python scripts/demo_milestone5.py --upstream https://api.openai.com/v1 --graph neo4j
+python -m bench.run --system zep --benchmark longmemeval_s --seed 42 --config configs/zep.yaml
+```
+
+### Design decisions that affect later benchmark validity
+
+28. **Graphiti, not Zep Cloud.** The paper must label the system "Zep
+    (Graphiti, self-hosted)". The Zep paper's LongMemEval numbers were
+    produced with the hosted service and its own context template; they are a
+    reference for Milestone 8, not a like-for-like target.
+29. **Per-message episodes.** This mirrors Zep's evaluation code and costs one
+    extraction pipeline per message. Mem0 ingests per session. That
+    asymmetry is each system's documented usage, and it is what the write-cost
+    comparison measures.
+30. **Facts carry validity dates in the context.** Graphiti's distinguishing
+    output is temporal validity; suppressing it would misrepresent the system.
+    `retrieval.fact_format: fact_only` exists for ablation only.
+31. **Settlement measures graph visibility.** Graphiti's `add_episode` is
+    synchronous, so like Mem0 its lag is expected near zero; the canary
+    exercises the vector and full-text indexes that Neo4j maintains
+    asynchronously, which is where a real lag would appear.
+
+## Milestone 6: the Letta adapter
+
+**Which Letta.** Letta's open-source Python server was retired: `github.com/letta-ai/letta`
+is now a landing page for `letta-code` (npm), and release **0.16.8** is the last
+"Letta V1 API server", kept by Letta "for reproducibility" and marked
+unsupported. That server is what the adapter benchmarks, self-hosted from the
+official image (`compose/letta`, which bundles PostgreSQL + pgvector). Every
+fingerprint and event carries `deployment: self-hosted-letta-v1-server-archived`;
+the paper must label it "Letta V1 server 0.16.8 (archived)".
+
+**Running it locally.** The server's dependency set (`mcp` 1.12.4, `fastmcp`
+2.12.5, `openai` 2.25.0) conflicts with the harness venv, and the wheel omits the
+Alembic migration tree the Docker entrypoint runs. `scripts/setup_letta_env.sh`
+builds `./.venv-letta` from Letta's own `uv.lock` at tag 0.16.8 and installs the
+migrations from the PyPI sdist; `tests/letta_server.py` runs migrations and the
+server against an embedded PostgreSQL with pgvector (`pgserver` wheel, started
+with TCP as an unprivileged user). The harness talks to it over HTTP with
+`letta-client` 1.12.1. Tests skip when the environment is absent.
+
+| Benchmark op | Letta call |
+|---|---|
+| `reset(s)` | delete agents named `memharness-<s>`, create a fresh `letta_v1_agent` with explicit `llm_config` / `embedding_config`, verified to have no passages |
+| `write(s, msgs)` | `agents.messages.create(agent, messages=<user/system/assistant turns>, max_steps)`: one agent step; the agent's LLM decides what to store via `memory_insert` / `memory_replace`; memory writes counted from returned tool calls |
+| `read(s, q)` | core memory blocks (`[label] value`) + `passages.search(q, top_k)` archival hits, one per line |
+| canary | `passages.create(text)` (documented direct archival write, no LLM), polled through the same read, `passages.delete` afterwards; `canary_mode: message` routes it through the agent for sleep-time studies |
+| `reset_all()` | delete every `memharness-*` agent |
+
+**Attribution.** Each agent's `model_endpoint` is a proxy path-token URL
+carrying system/configuration/seed/run/session and `operation=write` (the
+agent's model calls are writes by definition); the embedding endpoint carries
+the session and gets its operation from scopes (write / read / settle). The
+server's own startup model listing uses the global key and is logged as `meta`.
+The demo shows every call attributed with exact per-session client ids.
+
+**Architectural differences recorded in the fingerprint.** Letta's third memory
+tier, recall (the message history), is only reachable through the agent's
+`conversation_search` tool; the `messages/search` API in 0.16.8 requires Letta's
+hosted Turbopuffer backend, so recall is not part of the measured read context.
+Archival tools (`archival_memory_*`) are deprecated and absent from the v1
+default tool set, so archival memory is written only by the API unless
+`agent.extra_tools` attaches them. Message timestamps are ingestion time; the
+runner's date system message is passed through as a system-role message.
+Library defaults are kept (temperature 0.7, 4096 max tokens, chunk size 300).
+
+`tests/test_letta_adapter.py` (7) and `tests/test_letta_runner.py` (1) exercise
+the real server: repeated sessions with isolation, verified reset, attribution of
+agent chat calls (path token) and embeddings (scopes), failure logging,
+`reset_all`, fingerprint with the server-assigned system prompt hash and tool
+list, the committed config, the frozen server environment (config, compose and
+test launcher must agree), a six-write no-stall regression, and the LongMemEval
+runner driving Letta unchanged.
+The fake provider emulates a v1 agent step: a `memory_insert` tool call storing
+new user statements, then a text reply.
+
+```bash
+scripts/setup_letta_env.sh                                   # one-time: ./.venv-letta from Letta's lockfile
+.venv/bin/python scripts/demo_milestone6.py --sessions 3     # offline: embedded PostgreSQL + fake provider
+docker compose -f compose/letta/docker-compose.yml up -d     # paper runs: official image, proxy on the host
+python -m bench.run --system letta --benchmark longmemeval_s --seed 42 --config configs/letta.yaml
+```
+
+**A 60-second stall inside the server, and why the local environment must
+mirror the image's extras.** In the first local runs the second or third
+consecutive `messages.create` on an agent blocked for 60.9 s (sometimes 121 s)
+while the proxy showed every model call completing in milliseconds. The cause
+was traced with Postgres lock logging (nothing), `strace` on the server (below)
+and Python-level hooks in the server process:
+
+1. Letta creates an OpenAI client per LLM request and never closes it. When the
+   cyclic garbage collector reclaims it, asyncio's transport finaliser closes
+   the socket (freeing its file descriptor) while the openai client's finaliser
+   schedules `httpx.AsyncClient.aclose()` as a task for a later loop iteration.
+2. Letta 0.16.8 runs SQLAlchemy with `NullPool`, so the next database session
+   (in the stalled cases the fire-and-forget provider-trace write that follows
+   every LLM call) opens a fresh asyncpg socket, which receives the freed
+   descriptor.
+3. The scheduled `aclose()` reaches anyio's `SocketStream.aclose`, whose
+   `transport.close()` deregisters *by descriptor number* on the stdlib selector
+   loop, removing the new socket's connect callback. The connect never
+   completes; asyncpg's default 60 s connect timeout fires (`Failed to write to
+   PostgresProviderTraceBackend: TimeoutError` in the server log) and the step,
+   waiting on the same loop, resumes.
+
+```
+socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC, IPPROTO_TCP) = 11          # asyncpg, new DB connection
+connect(11, {sin_port=htons(<pg>)}, 16) = -1 EINPROGRESS
+epoll_ctl(3, EPOLL_CTL_ADD, 11, {events=EPOLLOUT, ...}) = 0          # sock_connect writer registered
+shutdown(-1, SHUT_WR) = -1 EBADF                                     # anyio aclose on the already-closed httpx socket
+epoll_ctl(3, EPOLL_CTL_DEL, 11, ...) = 0                             # ...deregisters fd 11: the DB connect
+close(11)                                          <-- 60.0 s later  # asyncpg connect timeout
+```
+
+Disabling the provider trace (`LETTA_TRACK_PROVIDER_TRACE=false`) only moves
+the victim: in a control run the same timeout hit the request path's own
+database connect and the write failed with HTTP 500. The decisive difference is
+the event loop. Letta's image installs the package with `uv sync --all-extras`,
+which includes the `experimental` extra (uvloop 0.21.0), and uvicorn's
+`loop="auto"` then runs the server on uvloop, whose transports do not
+deregister by descriptor number. The local environment had been built with the
+`sqlite` and `server` extras only, so it ran the stdlib selector loop; with the
+locked uvloop added and every server setting at its default, 10/10 consecutive
+writes acked in about 1 s with zero trace failures (`scripts/letta_stall_probe.py`).
+
+Consequences: `scripts/setup_letta_env.sh` installs the `experimental` extra;
+`tests/letta_server.py` checks that the environment runs uvloop before starting
+the server and refuses otherwise (an environment on the selector loop is not the
+system under test); the frozen server environment (two logging switches only)
+and the runtime expectation are declared in `configs/letta.yaml`
+(`server_env`, `server_runtime`), mirrored in `compose/letta` and the launcher
+(a test keeps the three in agreement), and copied into every fingerprint as
+`deployment_env` / `deployment_runtime`. A six-write regression test guards the
+latency path. `tests/pg_embedded.py` accepts `MEMHARNESS_PG_EXTRA_OPTS` for this
+kind of diagnosis (e.g. `-c log_lock_waits=on`). The stall is still a real
+property of the server on the stdlib loop (any deployment that installs Letta
+without uvloop); the paper can mention it as such, with this evidence chain, but
+it is not part of the measured system.
+
+### Design decisions that affect later benchmark validity
+
+32. **Letta is an agent, not a retrieval store.** Under the fixed-reader
+    protocol only core blocks and archival passages are visible; Letta's
+    intended operation lets the agent search recall itself. A `read.mode:
+    agent_answer` ablation (the Letta agent as its own reader) is a candidate
+    follow-up, clearly outside the uniform protocol.
+33. **Write cost is one agent step per write.** Each `messages.create` is at
+    least one LLM call over the full agent context (system prompt + core
+    memory + recent history), plus a call per tool round. That is Letta's
+    documented usage and what the write-cost comparison measures.
+34. **Core memory is bounded.** Blocks have character limits; on long
+    haystacks the agent must overwrite or the tool errors. The adapter records
+    tool return status and block limits so this is analysable, not hidden.
+35. **The system is unsupported upstream.** Any defect found in 0.16.8 is
+    final; the paper reports it as a property of the last released server.
+36. **The local environment must reproduce the image's runtime, and is checked.**
+    The 60 s stall above came from a dependency-set difference (no uvloop), not
+    from the memory system; it was found only because the proxy timestamps
+    contradicted the ack latency. Environment properties that change timing
+    (event loop, extras) are therefore frozen in the config, verified at server
+    start, and recorded in the fingerprint, so a latency distribution can always
+    be tied to the runtime that produced it.
 
 ## Engineering rules (from the pre-registration)
 

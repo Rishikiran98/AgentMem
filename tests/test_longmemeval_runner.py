@@ -80,7 +80,7 @@ def test_official_prompts_are_verbatim_ports():
     assert r.startswith("I will give you several facts extracted from history chats") and r.endswith("Question: What?\nAnswer:")
     assert "Current Date: 2023/06/01 (Thu) 09:00" in r
     h = prompt_hashes()
-    assert len(h) == 7 and all(len(v) == 64 for v in h.values())
+    assert len(h) >= 7 and all(len(v) == 64 for v in h.values()) and {"judge_default", "judge_abstention", "reader_longmemeval_facts"} <= set(h)
 
 
 async def test_vertical_slice_one_instance(proxy_server, proxy_log, dataset, tmp_path):

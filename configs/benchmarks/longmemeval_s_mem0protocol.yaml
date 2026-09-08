@@ -1,0 +1,58 @@
+# Milestone 4 Arm B: LongMemEval-S evaluated the way Mem0's memory-benchmarks
+# runner does it (OSS backend), so that Mem0's published protocol can be run
+# through the same instrumented path as the official protocol.
+# Source: github.com/mem0ai/memory-benchmarks (main, fetched 2026-09-07):
+#   benchmarks/longmemeval/run.py, prompts.py; benchmarks/common/llm_client.py, mem0_client.py; docker/mem0/main.py
+benchmark: longmemeval_s
+benchmark_version: longmemeval-cleaned-2025-09
+protocol: mem0-memory-benchmarks-oss
+dataset:
+  path: data/longmemeval_s_cleaned.json        # same file their runner downloads (DATASET_URL)
+  expected_sha256: null
+  expected_instances: 500
+
+ingest:
+  granularity: pair               # their pair_turns(): one add() per consecutive user/assistant pair (CHUNK_SIZE=2)
+  date_mode: none                 # their OSS server does not forward observation_date/timestamp to Memory.add()
+  strip_labels: true              # their pair_turns() also strips has_answer
+  skip_empty_pairs: true          # their loop skips pairs with any empty content
+
+settlement:
+  # Same policy as Arm A: accuracy runs plant no canaries (they would contaminate
+  # memories and ranking).  Their runner has no settlement check either (sync OSS add);
+  # visibility experiments call wait_settled explicitly.
+  policy: none                    # per_instance | per_session | none
+
+retrieval:
+  query: question                 # search(question_text, user_id, top_k=200)
+
+reader:                           # their ANSWER_GENERATION_PROMPT + post-processing
+  model: gpt-4o                   # README default; run.py's argparse default is gpt-5 (documented inconsistency)
+  temperature: 0.0                # LLMClient.generate default
+  max_tokens: 4096                # LLMClient.generate default
+  prompt: mem0_v3
+  memory_order: created_at_asc    # sliced_chrono = sorted(results[:cutoff], key=created_at)
+
+judge:                            # their unified JUDGE_PROMPT + _parse_yes_no_judgment
+  model: gpt-4o
+  temperature: 0.0
+  max_tokens: 4096
+  style: mem0_unified
+
+on_error: continue
+
+published_reference:
+  mem0:
+    value: 0.944
+    n: 500
+    correct: 472
+    source: "Mem0 README (github.com/mem0ai/mem0, main, 2026-09-07) and memory-benchmarks README: LongMemEval Top-200 94.4% (472/500), Mem0 managed platform, v3 pipeline"
+    setting: "managed platform (proprietary optimizations), single-pass retrieval, top_200; vendor states +/-1 point judge inconsistency"
+    per_type: {knowledge-update: 0.936, multi-session: 0.880, single-session-assistant: 0.982, single-session-preference: 0.967, single-session-user: 0.986, temporal-reasoning: 0.970}
+    tolerance_abs: 0.03
+  mem0_oss_gpt5:
+    value: 0.910
+    source: "memory-benchmarks README, 'OSS with Different Extraction Models': GPT-5 extraction, Qwen 600M embedder (SageMaker), GPT-5 answerer+judge"
+    setting: "self-hosted OSS pipeline with non-default models; not the default OpenAI stack"
+    per_type: {single-session-user: 0.957, single-session-assistant: 0.929, single-session-preference: 0.933, knowledge-update: 0.910, temporal-reasoning: 0.947, multi-session: 0.835}
+    tolerance_abs: 0.03

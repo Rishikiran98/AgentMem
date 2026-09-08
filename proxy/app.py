@@ -377,6 +377,8 @@ def _endpoint_kind(api_path: str, method: str) -> str:
         return "chat"
     if p == "/v1/embeddings" and method == "POST":
         return "embeddings"
+    if p == "/v1/responses" and method == "POST":
+        return "responses"  # OpenAI Responses API (used by Graphiti's default OpenAI client)
     if (p == "/v1/models" or p.startswith("/v1/models/")) and method == "GET":
         return "models"
     return "unsupported"
@@ -425,7 +427,7 @@ async def handle_model_request(state: ProxyState, request: Request, *, path_toke
     rec.request_bytes = len(body_bytes)
     rec.request_sha256 = hashlib.sha256(body_bytes).hexdigest() if body_bytes else None
     body: dict[str, Any] = {}
-    if rec.endpoint in ("chat", "embeddings"):
+    if rec.endpoint in ("chat", "embeddings", "responses"):
         try:
             body = json.loads(body_bytes)
             if not isinstance(body, dict):
@@ -442,6 +444,16 @@ async def handle_model_request(state: ProxyState, request: Request, *, path_toke
             rec.request_params["messages"] = len(body.get("messages") or [])
             rec._local_messages = body.get("messages")
             rec.stream = bool(body.get("stream"))
+        elif rec.endpoint == "responses":
+            inp = body.get("input")
+            rec.request_params["messages"] = len(inp) if isinstance(inp, list) else (1 if isinstance(inp, str) else 0)
+            rec._local_messages = inp if isinstance(inp, list) else ([{"role": "user", "content": inp}] if isinstance(inp, str) else None)
+            fmt = ((body.get("text") or {}).get("format") or {}) if isinstance(body.get("text"), dict) else {}
+            if fmt.get("type"):
+                rec.request_params["response_format"] = {"type": fmt.get("type"), "name": fmt.get("name")}
+            if "max_output_tokens" in body:
+                rec.request_params["max_tokens"] = body["max_output_tokens"]
+            rec.stream = bool(body.get("stream"))
         else:
             rec.embedding_inputs = embedding_input_count(body.get("input"))
             rec._local_embedding_input = body.get("input")
@@ -449,7 +461,7 @@ async def handle_model_request(state: ProxyState, request: Request, *, path_toke
             state.bodies_logger.append({"event_type": "REQUEST_BODY", "request_id": rec.request_id, "body": body})
 
     # 3. Forward
-    if rec.endpoint == "chat" and rec.stream:
+    if rec.endpoint in ("chat", "responses") and rec.stream:
         return await _forward_stream(state, request, rec, body)
     return await _forward_simple(state, request, rec, body_bytes if rec.endpoint != "models" else None)
 
@@ -494,6 +506,15 @@ async def _forward_simple(state: ProxyState, request: Request, rec: CallRecord, 
                     rec.finish_reason = choices[0].get("finish_reason")
                     msg = choices[0].get("message") or {}
                     rec._local_completion_text = msg.get("content") if isinstance(msg.get("content"), str) else None
+            elif rec.endpoint == "responses":
+                rec.finish_reason = payload.get("status")
+                texts = []
+                for item in payload.get("output") or []:
+                    if isinstance(item, dict):
+                        for part in item.get("content") or []:
+                            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                                texts.append(part["text"])
+                rec._local_completion_text = "".join(texts) if texts else None
             elif rec.endpoint == "embeddings":
                 data = payload.get("data") or []
                 rec.embedding_vectors = len(data)
@@ -531,6 +552,12 @@ def _absorb_usage(rec: CallRecord, payload: dict[str, Any]) -> None:
     usage = payload.get("usage")
     if isinstance(usage, dict) and usage:
         rec.usage = {k: v for k, v in usage.items() if v is not None}
+        # Responses API reports input_tokens/output_tokens; normalise to the chat names
+        # so analysis has one schema.  The originals stay in usage_details.
+        if "prompt_tokens" not in rec.usage and "input_tokens" in rec.usage:
+            rec.usage["prompt_tokens"] = rec.usage["input_tokens"]
+        if "completion_tokens" not in rec.usage and "output_tokens" in rec.usage:
+            rec.usage["completion_tokens"] = rec.usage["output_tokens"]
         rec.usage_source = "upstream"
         if "total_tokens" not in rec.usage and "prompt_tokens" in rec.usage:
             rec.usage["total_tokens"] = rec.usage["prompt_tokens"] + rec.usage.get("completion_tokens", 0)
@@ -539,6 +566,8 @@ def _absorb_usage(rec: CallRecord, payload: dict[str, Any]) -> None:
 async def _forward_stream(state: ProxyState, request: Request, rec: CallRecord, body: dict[str, Any]) -> Response:
     settings = state.settings
     client_requested_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+    if rec.endpoint == "responses":
+        client_requested_usage = True  # Responses streams always end with response.completed carrying usage
     if settings.force_stream_usage and not client_requested_usage:
         body = dict(body)
         body["stream_options"] = {**(body.get("stream_options") or {}), "include_usage": True}
@@ -618,6 +647,8 @@ async def _forward_stream(state: ProxyState, request: Request, rec: CallRecord, 
                 _absorb_usage(rec, obj)
                 if not client_requested_usage and not choices:
                     keep = False  # injected usage-only chunk
+            elif isinstance(obj.get("response"), dict) and isinstance(obj["response"].get("usage"), dict):
+                _absorb_usage(rec, obj["response"])  # Responses API: response.completed event
         return keep
 
     async def stream_body() -> AsyncIterator[bytes]:

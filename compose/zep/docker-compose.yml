@@ -1,0 +1,42 @@
+# Persistence for the Zep/Graphiti system under test: a dedicated Neo4j server
+# (Graphiti's primary documented backend; the Zep paper used Neo4j) with its own
+# volumes and network.  Graphiti itself runs in-process in the harness.
+#
+#   docker compose -f compose/zep/docker-compose.yml up -d
+#   docker compose -f compose/zep/docker-compose.yml down -v   # full wipe
+services:
+  neo4j:
+    # graphiti-core 0.30.x documents Neo4j 5.26.
+    image: neo4j:5.26.0
+    container_name: memharness-zep-neo4j
+    ports:
+      - "127.0.0.1:7687:7687"
+      - "127.0.0.1:7474:7474"
+    environment:
+      - NEO4J_AUTH=neo4j/memharness-zep
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_server_memory_heap_initial__size=1G
+      - NEO4J_server_memory_heap_max__size=2G
+      - NEO4J_server_memory_pagecache_size=1G
+    volumes:
+      - zep_neo4j_data:/data
+      - zep_neo4j_logs:/logs
+    networks:
+      - zep_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7474 >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: "no"
+
+volumes:
+  zep_neo4j_data:
+    name: memharness_zep_neo4j_data
+  zep_neo4j_logs:
+    name: memharness_zep_neo4j_logs
+
+networks:
+  zep_net:
+    name: memharness_zep_net

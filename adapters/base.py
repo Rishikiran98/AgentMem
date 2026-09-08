@@ -77,6 +77,7 @@ class ReadHit:
     text: str
     score: float | None = None
     metadata: dict[str, Any] | None = None
+    created_at: str | None = None  # system-reported creation timestamp, if it exposes one
 
 
 @dataclass

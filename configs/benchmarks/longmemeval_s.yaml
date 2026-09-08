@@ -35,10 +35,18 @@ judge:                            # official LongMemEval judge (evaluate_qa.py)
 
 on_error: continue                # continue | abort  (per-instance failures are recorded as events either way)
 
-# Reproduction target for Milestone 4.  Must cite a concrete published source
-# (paper table / blog post URL, retrieval date) before the comparative campaign.
+# Reproduction target for Milestone 4 (Arm A: official LongMemEval protocol).
+# Mem0 has published no LongMemEval-S number under the official protocol; the
+# closest citable figures are its own-protocol platform result (94.4) and an
+# OSS result with non-default models (91.0).  See docs/milestone4_reproduction.md
+# for the pre-registered comparison rule.  Values are fractions in [0, 1].
 published_reference:
   mem0:
-    value: null
-    source: null
-    tolerance_abs: null
+    value: 0.944
+    n: 500
+    correct: 472
+    source: "Mem0 README (github.com/mem0ai/mem0, main, fetched 2026-09-07) and github.com/mem0ai/memory-benchmarks README: LongMemEval Top-200 94.4% (472/500)"
+    setting: "Mem0 managed platform, v3 pipeline, single-pass retrieval at top_200, Mem0's own answer/judge prompts; vendor states +/-1 point judge inconsistency and that OSS users should not expect identical numbers"
+    protocol_matches_this_config: false
+    per_type: {knowledge-update: 0.936, multi-session: 0.880, single-session-assistant: 0.982, single-session-preference: 0.967, single-session-user: 0.986, temporal-reasoning: 0.970}
+    tolerance_abs: 0.03
